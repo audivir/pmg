@@ -1,0 +1,11 @@
+# Changes here will be overwritten by Copier
+_commit: e730ed7
+_src_path: gh:audivir/copier-template
+author_email: pypi@audivir.de
+author_name: Tim Hörmann
+description: Simple package manager for prebuilt binaries in the home directory.
+github_org: audivir
+project_name: pmg
+project_slug: pmg
+project_type: python
+publishable: true

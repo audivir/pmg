@@ -1,0 +1,21 @@
+min_glibc = "2.18"
+bin = { bat = "bat" }
+check = {}
+
+[external]
+brew = "bat"
+apt = "bat"
+
+[release]
+type = "github"
+repo = "sharkdp/bat"
+
+[download]
+type = "github"
+
+[assets]
+glibc_x64 = "bat-{{ tag }}-x86_64-unknown-linux-gnu.tar.gz"
+glibc_arm64 = "bat-{{ tag }}-aarch64-unknown-linux-gnu.tar.gz"
+musl_x64 = "bat-{{ tag }}-x86_64-unknown-linux-musl.tar.gz"
+musl_arm64 = "bat-{{ tag }}-aarch64-unknown-linux-musl.tar.gz"
+macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
