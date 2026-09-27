@@ -73,12 +73,15 @@ pmg. `PMG_HOME` defaults to `$XDG_DATA_HOME/pmg` and also holds the install reco
 
 ```bash
 python -m pmg install bat
+python -m pmg install bat@v0.25.0
 python -m pmg list
 python -m pmg uninstall bat
 python -m pmg autoremove
 ```
 
-- `install` also installs the dependencies, listed in `deps`.
+- `install` also installs the dependencies, listed in `deps`. `name@tag` installs the release with
+  that tag instead of the latest one, using the tag as the project writes it (`bat@v0.25.0`,
+  `zig@0.15.1`).
 - `uninstall` refuses while another installed package depends on the package.
 - `autoremove` removes dependencies that no directly installed package needs anymore.
 - Set `PMG_GH_TOKEN` (or `GH_TOKEN`) to avoid the rate limit of the GitHub API.

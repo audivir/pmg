@@ -7,7 +7,7 @@ if __name__ == "__main__":
 
     import doctyper
 
-    from pmg.core import autoremove, install, list_installed, logger, uninstall
+    from pmg.core import autoremove, install, list_installed, logger, uninstall, use
 
     # info for pmg only, as httpx logs every request at info.
     logging.basicConfig(format="%(message)s")
@@ -16,5 +16,6 @@ if __name__ == "__main__":
     app.command()(install)
     app.command()(uninstall)
     app.command()(autoremove)
+    app.command()(use)
     app.command("list")(list_installed)
     app()

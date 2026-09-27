@@ -174,8 +174,8 @@ class Env:
         return subprocess.check_output([self.bin / name], text=True).strip()  # noqa: S603
 
     def installed(self) -> dict[str, str]:
-        rows = (line.split() for line in self.pmg("list").stdout.splitlines())
-        return {name: f"{tag} {kind}" for name, tag, kind in rows}
+        rows = (line.partition(" ") for line in self.pmg("list").stdout.splitlines())
+        return {key: state for key, _, state in rows}
 
 
 @pytest.fixture
@@ -193,7 +193,11 @@ def test_install_resolves_dependencies(env: Env) -> None:
     env.pmg("install", "app")
     assert env.run_bin("app") == "app 1.0"
     assert env.run_bin("base") == "base 1.0"
-    expected = {"app": "v1.0 explicit", "base": "v1.0 dependency", "lib": "v1.0 dependency"}
+    expected = {
+        "app@v1.0": "explicit active",
+        "base@v1.0": "dependency active",
+        "lib@v1.0": "dependency active",
+    }
     assert env.installed() == expected
     # installing again leaves everything as it is
     env.pmg("install", "app")
@@ -260,7 +264,7 @@ def test_content_becomes_package_dir_with_links(env: Env) -> None:
     env.pmg("install", "tool")
     assert env.run_bin("tool") == "from lib"
     env.pmg("uninstall", "tool")
-    assert not (env.data / "tool-root").exists()
+    assert not (env.data / "tool-root@v1.0").exists()
     assert list(env.bin.iterdir()) == []
 
 
@@ -273,23 +277,49 @@ def test_extra_dirs_are_owned(env: Env) -> None:
     env.pmg("install", "tool")
     assert (env.data / "tool-cache" / "state").read_text() == "state\n"
     # the package dir stays absent, as nothing was put into it
-    assert not (env.data / "tool").exists()
+    assert not (env.data / "tool@v1.0").exists()
     env.pmg("uninstall", "tool")
     assert not (env.data / "tool-cache").exists()
 
 
 def test_install_refuses_foreign_package_dir(env: Env) -> None:
     env.add_package("tool", spec=("content = true",))
-    (env.data / "tool").mkdir(parents=True)
+    (env.data / "tool@v1.0").mkdir(parents=True)
     assert "exists and does not belong to tool" in env.pmg("install", "tool", ok=False).stderr
     assert not (env.bin / "tool").exists()
+
+
+def test_versions_side_by_side(env: Env) -> None:
+    for version in ("1.0", "2.0"):
+        env.add_package(
+            "tool", version=version, files={"tool.1": ".TH TOOL 1\n"}, spec=('man = ["tool.1"]',)
+        )
+    env.pmg("install", "tool@v1.0", "tool@v2.0")
+    # a given tag only becomes active if no other version is
+    assert env.run_bin("tool") == "tool 1.0"
+    assert env.run_bin("tool@v2.0") == "tool 2.0"
+    env.pmg("use", "tool@v2.0")
+    assert env.run_bin("tool") == "tool 2.0"
+    assert "tool@v2.0" in str((env.data / "man" / "man1" / "tool.1").resolve())
+    env.pmg("uninstall", "tool@v2.0")
+    # the remaining version takes over
+    assert env.run_bin("tool") == "tool 1.0"
+    # the latest version, v2.0 from the spec, becomes active
+    env.pmg("install", "tool")
+    assert env.installed() == {"tool@v1.0": "explicit", "tool@v2.0": "explicit active"}
+    env.pmg("uninstall", "tool@v1.0")
+    env.pmg("use", "tool@v2.0")
+    assert env.installed() == {"tool@v2.0": "explicit active"}
+    env.pmg("uninstall", "tool")
+    assert env.installed() == {}
+    assert list(env.bin.iterdir()) == []
 
 
 def test_command_release_sets_the_version(env: Env) -> None:
     env.add_package("tool", version="2.5", release='type = "command"\ncmd = "echo v2.5"')
     env.pmg("install", "tool")
     assert env.run_bin("tool") == "tool 2.5"
-    assert env.installed() == {"tool": "v2.5 explicit"}
+    assert env.installed() == {"tool@v2.5": "explicit active"}
 
 
 def test_failing_command_in_release_pipeline_fails(env: Env) -> None:
@@ -325,7 +355,7 @@ def test_autoremove_removes_orphans_transitively(env: Env) -> None:
     env.add_package("base")
     env.pmg("install", "app")
     env.pmg("uninstall", "app")
-    assert env.installed() == {"base": "v1.0 dependency", "lib": "v1.0 dependency"}
+    assert env.installed() == {"base@v1.0": "dependency active", "lib@v1.0": "dependency active"}
     env.pmg("autoremove")
     assert env.installed() == {}
     assert list(env.bin.iterdir()) == []
@@ -337,7 +367,7 @@ def test_autoremove_keeps_shared_dependencies(env: Env) -> None:
     env.add_package("base")
     env.pmg("install", "app")
     env.pmg("autoremove")
-    assert set(env.installed()) == {"app", "lib", "base"}
+    assert set(env.installed()) == {"app@v1.0", "lib@v1.0", "base@v1.0"}
 
 
 def test_autoremove_keeps_dependency_requested_directly(env: Env) -> None:
@@ -346,7 +376,7 @@ def test_autoremove_keeps_dependency_requested_directly(env: Env) -> None:
     env.pmg("install", "app", "lib")
     env.pmg("uninstall", "app")
     env.pmg("autoremove")
-    assert env.installed() == {"lib": "v1.0 explicit"}
+    assert env.installed() == {"lib@v1.0": "explicit active"}
 
 
 def test_install_promotes_dependency_to_explicit(env: Env) -> None:
@@ -356,7 +386,7 @@ def test_install_promotes_dependency_to_explicit(env: Env) -> None:
     env.pmg("install", "lib")
     env.pmg("uninstall", "app")
     env.pmg("autoremove")
-    assert env.installed() == {"lib": "v1.0 explicit"}
+    assert env.installed() == {"lib@v1.0": "explicit active"}
 
 
 def test_uninstall_refuses_needed_dependency(env: Env) -> None:
@@ -383,6 +413,7 @@ def test_install_refuses_to_overwrite_foreign_file(env: Env) -> None:
     (env.bin / "tool").write_text("mine")
     assert "exists and does not belong to tool" in env.pmg("install", "tool", ok=False).stderr
     assert (env.bin / "tool").read_text() == "mine"
+    assert [path.name for path in env.bin.iterdir()] == ["tool"]
     assert env.installed() == {}
 
 
@@ -437,7 +468,7 @@ def test_dependency_cycle(env: Env) -> None:
     [
         ("bat", ["--version"], ["man/man1/bat.1", "zsh/site-functions/_bat"]),
         # zig only runs if it finds its lib dir through the symlink
-        ("zig", ["version"], ["zig/lib"]),
+        ("zig", ["version"], ["zig@*/lib"]),
     ],
 )
 def test_install_from_fixture_spec(
@@ -448,4 +479,4 @@ def test_install_from_fixture_spec(
     subprocess.check_call([sys.executable, "-m", "pmg", "install", name], env=env)  # noqa: S603
     subprocess.check_call([tmp_path / ".local" / "bin" / name, *args])  # noqa: S603
     data = tmp_path / ".local" / "share"
-    assert all((data / path).exists() for path in extra_files)
+    assert all(list(data.glob(pattern)) for pattern in extra_files)

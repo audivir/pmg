@@ -155,16 +155,25 @@ class Package(BaseStruct, kw_only=True):
 
 
 class Record(BaseStruct, kw_only=True):
-    """Stores the installed state of a package."""
+    """Stores the installed state of one version of a package."""
 
+    name: str
     tag: str
     explicit: bool
     """Whether the package was requested directly rather than pulled in as a dependency."""
+    active: bool
+    """Whether the plain names in the shared layout link to this version."""
+    installed_at: float
     deps: list[str]
     files: list[str]
     """Absolute paths of the installed files."""
     dirs: list[str] = []
     """Absolute paths of the dirs owned by the package."""
+
+    @property
+    def key(self) -> str:
+        """Name and tag as name@tag, which also names the record file."""
+        return f"{self.name}@{self.tag}"
 
 
 class Context(msgspec.Struct, kw_only=True):

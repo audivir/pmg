@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -132,6 +133,16 @@ def layout() -> dict[str, Path]:
     }
 
 
+def versioned(path: Path, tag: str) -> Path:
+    """Returns the path with @tag appended to its name."""
+    return path.with_name(f"{path.name}@{tag}")
+
+
+def version_store(name: str, tag: str) -> Path:
+    """Returns the dir holding the man pages and completions of a package version."""
+    return pmg_home() / "share" / f"{name}@{tag}"
+
+
 def make_context(name: str, pkg: Package, tag: str) -> Context:
     """Resolves the template variables of a package."""
     data, bin_dir = data_home(), layout()["bin"]
@@ -140,7 +151,7 @@ def make_context(name: str, pkg: Package, tag: str) -> Context:
         tag=tag,
         data=data,
         bin=bin_dir,
-        dir=Path(render(pkg.dir, base)) if pkg.dir else base.dir,
+        dir=versioned(Path(render(pkg.dir, base)) if pkg.dir else base.dir, tag),
         dirs={key: Path(render(value, base)) for key, value in pkg.dirs.items()},
     )
 
@@ -166,13 +177,13 @@ def load_spec(name: str) -> Package:
         raise PmgError(f"invalid spec {path}: {e}") from e
 
 
-def record_path(name: str) -> Path:
-    """Returns the path of the install record of a package."""
-    return pmg_home() / "installed" / f"{name}.json"
+def record_path(key: str) -> Path:
+    """Returns the path of the install record of a package version, named name@tag."""
+    return pmg_home() / "installed" / f"{key}.json"
 
 
 def load_records() -> dict[str, Record]:
-    """Loads the install records of all installed packages."""
+    """Loads the install records of all installed package versions, by name@tag."""
     records_dir = pmg_home() / "installed"
     if not records_dir.is_dir():
         return {}
@@ -182,9 +193,9 @@ def load_records() -> dict[str, Record]:
     }
 
 
-def save_record(name: str, record: Record) -> None:
-    """Writes the install record of a package atomically."""
-    path = record_path(name)
+def save_record(record: Record) -> None:
+    """Writes the install record of a package version atomically."""
+    path = record_path(record.key)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".json.tmp")
     tmp_path.write_bytes(msgspec.json.format(msgspec.json.encode(record)))
@@ -442,8 +453,10 @@ def owned_dirs(target: Path, context: Context) -> dict[Path, Path]:
     return {path: dest for path, dest in staged.items() if any(path.iterdir())}
 
 
-def destination(relative: Path) -> Path:
-    """Returns the install location of a file in the staging dir.
+def destination(relative: Path, name: str, tag: str) -> Path:
+    """Returns the install location of a staged file of a package version.
+
+    Commands get @tag appended, man pages and completions go to the version store.
 
     Raises:
         PmgError: If the file is outside the layout.
@@ -451,30 +464,80 @@ def destination(relative: Path) -> Path:
     roots = layout()
     if relative.parts[0] not in roots:  # pragma: no cover
         raise PmgError(f"{relative} is outside the install layout {sorted(roots)}")
-    return roots[relative.parts[0]].joinpath(*relative.parts[1:])
+    if relative.parts[0] == "bin":
+        return versioned(roots["bin"].joinpath(*relative.parts[1:]), tag)
+    return version_store(name, tag) / relative
 
 
-def verify_no_overwrites(name: str, files: list[Path], dirs: list[Path]) -> None:
-    """Checks that no file or dir of the package would replace an existing one.
+def active_links(record: Record) -> dict[Path, Path]:
+    """Maps the plain paths in the shared layout to the files of the version they link to."""
+    roots, store = layout(), version_store(record.name, record.tag)
+    links: dict[Path, Path] = {}
+    for file in map(Path, record.files):
+        if file.is_relative_to(store):
+            relative = file.relative_to(store)
+            links[roots[relative.parts[0]].joinpath(*relative.parts[1:])] = file
+        else:
+            links[file.with_name(file.name.removesuffix(f"@{record.tag}"))] = file
+    return links
+
+
+def active_version(records: dict[str, Record], name: str) -> Record | None:
+    """Returns the active version of a package."""
+    return next((r for r in records.values() if r.name == name and r.active), None)
+
+
+def verify_free(record: Record, paths: list[Path]) -> None:
+    """Checks that none of the paths of a version exists yet.
 
     Raises:
-        PmgError: If an install location is already taken.
+        PmgError: If a path is already taken.
     """
-    for dest in [*(destination(relative) for relative in files), *dirs]:
-        if dest.exists() or dest.is_symlink():
-            raise PmgError(f"{dest} exists and does not belong to {name}")
+    for path in paths:
+        if path.exists() or path.is_symlink():
+            raise PmgError(f"{path} exists and does not belong to {record.name}")
 
 
-def move_data(target: Path, files: list[Path], dirs: dict[Path, Path]) -> list[Path]:
-    """Moves the staged files and dirs to their install locations and returns those locations."""
-    moves = [(target / relative, destination(relative)) for relative in files]
-    moves += dirs.items()
+def verify_links_free(record: Record, current: Record | None) -> None:
+    """Checks that the plain names of a version are free, apart from those of `current`."""
+    replaced = set(active_links(current)) if current else set()
+    verify_free(record, [link for link in active_links(record) if link not in replaced])
+
+
+def unlink_active(record: Record) -> None:
+    """Removes the plain names of a version from the shared layout."""
+    for link in active_links(record):
+        # a link is only missing if it was removed by hand.
+        if link.is_symlink():  # pragma: no branch
+            link.unlink()
+
+
+def activate(record: Record, records: dict[str, Record]) -> None:
+    """Links the plain names of a package to this version, replacing those of another version."""
+    current = active_version(records, record.name)
+    if current is not None and current.key == record.key:
+        return
+    verify_links_free(record, current)
+    if current is not None:
+        unlink_active(current)
+        current.active = False
+        save_record(current)
+    for link, target in active_links(record).items():
+        link.parent.mkdir(parents=True, exist_ok=True)
+        # commands link to their version next to them, e.g. bat -> bat@v0.26.1.
+        link.symlink_to(target.name if target.parent == link.parent else target)
+    record.active = True
+    save_record(record)
+
+
+def move_data(target: Path, moves: list[tuple[Path, Path]]) -> list[Path]:
+    """Moves staged files and dirs to their install locations and returns those locations."""
     moved: list[Path] = []
     try:
-        for staged, dest in moves:
+        for relative, dest in moves:
             dest.parent.mkdir(parents=True, exist_ok=True)
             # a rename, so atomic, as the staging dir is on the same filesystem.
-            shutil.move(staged, dest)
+            shutil.move(target / relative, dest)
             moved.append(dest)
     except BaseException:
         rewind_state(moved)
@@ -519,88 +582,137 @@ def resolve_install_order(names: list[str]) -> list[str]:
         raise PmgError(f"dependency cycle: {' -> '.join(e.args[1])}") from e
 
 
-def install_package(name: str, explicit: bool) -> None:
-    """Installs a package without its dependencies, or marks an installed one as explicit."""
-    record = load_records().get(name)
+def install_package(name: str, explicit: bool, tag: str | None = None) -> None:
+    """Installs a version of a package without its dependencies.
+
+    Installs the latest version, or `tag`. The latest version becomes active; a given tag only if
+    no other version is active. An installed version is only marked as explicit if requested.
+
+    Args:
+        name: Name of the package.
+        explicit: Whether the package was requested directly.
+        tag: Release tag to install instead of the latest one.
+    """
+    records = load_records()
+    current = active_version(records, name)
+    pkg = load_spec(name)
+    if tag is None and current is not None and not explicit:
+        # any version satisfies a dependency.
+        return
+    should_activate = tag is None or current is None
+    if tag is None:
+        tag = fetch_release(name, pkg)
+    record = records.get(f"{name}@{tag}")
     if record is not None:
         if explicit and not record.explicit:
             record.explicit = True
-            save_record(name, record)
+            save_record(record)
         return
-    pkg = load_spec(name)
-    tag = fetch_release(name, pkg)
     context = make_context(name, pkg, tag)
     host = detect_platform(pkg.min_glibc_tuple)
     with target_layout(context) as target:
         archive = run_download(pkg, context, host, target.parent / "download")
         run_install(name, pkg, context, archive, target)
-        files = track_installed_files(target)
         dirs = owned_dirs(target, context)
-        verify_no_overwrites(name, files, list(dirs.values()))
-        moved = move_data(target, files, dirs)
+        moves = [(path, destination(path, name, tag)) for path in track_installed_files(target)]
+        record = Record(
+            name=name,
+            tag=tag,
+            explicit=explicit,
+            active=False,
+            installed_at=time.time(),
+            deps=pkg.deps,
+            files=[str(dest) for _, dest in moves],
+            dirs=[str(dest) for dest in dirs.values()],
+        )
+        verify_free(record, [*map(Path, record.files), *map(Path, record.dirs)])
+        if should_activate:
+            verify_links_free(record, current)
+        dir_moves = [(path.relative_to(target), dest) for path, dest in dirs.items()]
+        moved = move_data(target, [*moves, *dir_moves])
         try:
-            record = Record(
-                tag=tag,
-                explicit=explicit,
-                deps=pkg.deps,
-                files=[str(path) for path in moved[: len(files)]],
-                dirs=[str(path) for path in moved[len(files) :]],
-            )
-            save_record(name, record)
+            save_record(record)
+            if should_activate:
+                activate(record, {**records, record.key: record})
         except BaseException:
             rewind_state(moved)
+            # the record dir may be what failed.
+            with contextlib.suppress(OSError):
+                record_path(record.key).unlink(missing_ok=True)
             raise
     logger.info("installed %s %s", name, tag)
 
 
-def uninstall_package(name: str, record: Record) -> None:
-    """Runs the uninstall hook of a package and removes its files and record.
+def uninstall_version(record: Record) -> None:
+    """Runs the uninstall hook of a package version and removes its files, dirs, and record.
 
     Raises:
         PmgError: If the uninstall hook fails.
     """
-    pkg = load_spec(name) if name in available_specs() else None
+    pkg = load_spec(record.name) if record.name in available_specs() else None
     if pkg and pkg.uninstall:
-        run_shell(name, "uninstall", render(pkg.uninstall, make_context(name, pkg, record.tag)))
+        context = make_context(record.name, pkg, record.tag)
+        run_shell(record.name, "uninstall", render(pkg.uninstall, context))
+    if record.active:
+        unlink_active(record)
     for path in [*record.files, *record.dirs]:
         remove_path(Path(path))
-    record_path(name).unlink()
-    logger.info("uninstalled %s", name)
+    record_path(record.key).unlink()
+    logger.info("uninstalled %s", record.key)
 
 
-def uninstall_packages(names: list[str]) -> None:
-    """Uninstalls packages, dependents before their dependencies.
+def uninstall_packages(args: list[str]) -> None:
+    """Uninstalls all versions of packages, or single versions given as name@tag.
+
+    Dependents go before their dependencies. If the active version of a package goes and others
+    stay, the most recently installed of them becomes active.
 
     Raises:
         PmgError: If a package is not installed or another installed package depends on it.
     """
     records = load_records()
-    removing = set(names)
-    if missing := sorted(removing - records.keys()):  # pragma: no cover
-        raise PmgError(f"not installed: {', '.join(missing)}")
-    for name, record in records.items():
-        if name in removing:
-            continue
-        if needed := sorted(removing.intersection(record.deps)):
-            raise PmgError(f"{name} depends on {', '.join(needed)}")
+    removing: set[str] = set()
+    for arg in args:
+        name, _, tag = arg.partition("@")
+        keys = {key for key, r in records.items() if r.name == name and tag in {"", r.tag}}
+        if not keys:  # pragma: no cover
+            raise PmgError(f"not installed: {arg}")
+        removing |= keys
+    remaining = {key: r for key, r in records.items() if key not in removing}
+    gone = {records[key].name for key in removing} - {r.name for r in remaining.values()}
+    for record in remaining.values():
+        if needed := sorted(gone.intersection(record.deps)):
+            raise PmgError(f"{record.name} depends on {', '.join(needed)}")
+    names = {records[key].name for key in removing}
     sorter = graphlib.TopologicalSorter(
-        {name: [dep for dep in records[name].deps if dep in removing] for name in removing}
+        {
+            name: {
+                dep for key in removing if records[key].name == name for dep in records[key].deps
+            }
+            & names
+            for name in names
+        }
     )
     for name in reversed(list(sorter.static_order())):
-        uninstall_package(name, records[name])
+        for key in sorted(key for key in removing if records[key].name == name):
+            uninstall_version(records[key])
+    for name in names - gone:
+        versions = [r for r in remaining.values() if r.name == name]
+        if not any(r.active for r in versions):
+            activate(max(versions, key=lambda r: r.installed_at), remaining)
 
 
 def find_orphans(records: dict[str, Record]) -> list[str]:
-    """Returns the packages neither requested directly nor needed by a requested package."""
+    """Returns the versions of packages neither requested directly nor needed by one."""
     required: set[str] = set()
-    pending = [name for name, record in records.items() if record.explicit]
+    pending = [record.name for record in records.values() if record.explicit]
     while pending:
         name = pending.pop()
-        if name in required or name not in records:
+        if name in required:
             continue
         required.add(name)
-        pending.extend(records[name].deps)
-    return sorted(records.keys() - required)
+        pending.extend(dep for r in records.values() if r.name == name for dep in r.deps)
+    return sorted(key for key, record in records.items() if record.name not in required)
 
 
 @contextlib.contextmanager
@@ -617,19 +729,23 @@ def install(names: list[str]) -> None:
     """Installs packages and their dependencies.
 
     Args:
-        names: Names of the packages to install.
+        names: Names of the packages to install, each optionally with a release tag as name@tag.
     """
     with exit_on_error():
-        requested = set(names)
-        for name in resolve_install_order(names):
-            install_package(name, explicit=name in requested)
+        requested: dict[str, list[str | None]] = {}
+        for arg in names:
+            name, _, tag = arg.partition("@")
+            requested.setdefault(name, []).append(tag or None)
+        for name in resolve_install_order(list(requested)):
+            for requested_tag in requested.get(name, [None]):
+                install_package(name, explicit=name in requested, tag=requested_tag)
 
 
 def uninstall(names: list[str]) -> None:
     """Uninstalls packages; their dependencies stay until `autoremove`.
 
     Args:
-        names: Names of the packages to uninstall.
+        names: Names of the packages to uninstall with all their versions, or name@tag for one.
     """
     with exit_on_error():
         uninstall_packages(names)
@@ -642,8 +758,22 @@ def autoremove() -> None:
             uninstall_packages(orphans)
 
 
+def use(name: str) -> None:
+    """Makes a version the one the plain command names, man pages, and completions link to.
+
+    Args:
+        name: Package version as name@tag.
+    """
+    with exit_on_error():
+        records = load_records()
+        record = records.get(name)
+        if record is None:  # pragma: no cover
+            raise PmgError(f"not installed: {name}")
+        activate(record, records)
+
+
 def list_installed() -> None:
-    """Lists the installed packages with their tags."""
-    for name, record in load_records().items():
+    """Lists the installed package versions."""
+    for key, record in load_records().items():
         kind = "explicit" if record.explicit else "dependency"
-        sys.stdout.write(f"{name} {record.tag} {kind}\n")
+        sys.stdout.write(f"{key} {kind}{' active' if record.active else ''}\n")
