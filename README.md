@@ -48,7 +48,8 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
   or installing into the staging directory), `static` (release only), `apk` (packages of the main Alpine repo, of the host release or else
   latest-stable), or `conda` (the newest `.conda` file of the asset package in a channel).
 - glibc hosts older than `min_glibc` get the musl asset. `platforms` limits a package to some
-  platforms, other hosts skip it as a dependency.
+  platforms, other hosts skip it as a dependency. `platform_deps` adds dependencies for the
+  platform whose asset is used, e.g. a loader for the musl build on old glibc hosts.
 - `bin` maps names in `~/.local/bin` to paths in the archive. A single top-level directory in
   the archive is stripped. `links` adds symlinks instead of copies.
 - `man` lists man pages in the archive, the file extension is the section.
@@ -62,12 +63,14 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
 - `check` detects a copy that pmg did not install: `files` must exist, the dynamic loader must find
   `libs`, and `cmd` must run. Without them, the first command of the package runs with `args`
   (`--version`). The version is the first match of `regex` in the output. Such an external version
-  satisfies dependencies and is only recorded, pmg leaves its files alone.
+  satisfies dependencies and is only recorded, pmg leaves its files alone. `dev_tool = true` marks
+  commands that macOS ships as stubs in `/usr/bin` (`cc`, `git`, `make`, `python3`), which only
+  count if the developer tools are installed.
 - `post_install` runs a shell command in the staging directory `PREFIX`, with the unpacked archive
   in `CONTENT`, e.g. to build from source. `{{ spec_dir }}` is the directory of the spec, for files
   shipped next to it. `uninstall` runs before the files are removed, and `upgrade` updates a
   package in place that updates itself. Spec commands run with `set -euo pipefail` and the bin
-  directory in `PATH`.
+  directory in `PATH`. Their output is only shown if they fail.
 - `env` sets environment variables for the spec commands and, with `paths` as `PATH` entries, for
   the shell through `pmg env`. During an install, `{{ dir }}` and `{{ dirs.<key> }}` point to the
   staging directory there.

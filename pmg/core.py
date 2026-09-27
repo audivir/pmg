@@ -37,6 +37,7 @@ import jinja2
 import msgspec
 import zstandard
 from mxhttp import BearerAuth, Downloader, RawPath, SyncConsumer, base_url, get
+from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
@@ -297,26 +298,32 @@ def run_shell(
 ) -> str:
     """Runs a spec command with `set -euo pipefail` and returns its output.
 
+    Its stderr is only shown if it fails.
+
     Raises:
         PmgError: If the command fails.
     """
-    try:
-        # spec commands are shell commands by design.
-        return subprocess.check_output(  # noqa: S602
-            f"set -euo pipefail\n{cmd}",
-            shell=True,
-            executable=spec_shell(),
-            cwd=cwd,
-            text=True,
-            # commands installed as dependencies are in the bin dir, which may not be in PATH.
-            env={
-                **os.environ,
-                "PATH": f"{layout()['bin']}{os.pathsep}{os.getenv('PATH', '')}",
-                **(env or {}),
-            },
-        )
-    except subprocess.CalledProcessError as e:
-        raise PmgError(f"{step} of {name} failed with exit code {e.returncode}") from e
+    # spec commands are shell commands by design.
+    result = subprocess.run(  # noqa: S602
+        f"set -euo pipefail\n{cmd}",
+        shell=True,
+        executable=spec_shell(),
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+        # commands installed as dependencies are in the bin dir, which may not be in PATH.
+        env={
+            **os.environ,
+            "PATH": f"{layout()['bin']}{os.pathsep}{os.getenv('PATH', '')}",
+            **(env or {}),
+        },
+    )
+    if result.returncode:
+        # build warnings and progress only matter when the command fails
+        stderr = "".join(result.stderr.splitlines(keepends=True)[-20:])
+        raise PmgError(f"{step} of {name} failed with exit code {result.returncode}:\n{stderr}")
+    return result.stdout
 
 
 def alpine_repo() -> str:
@@ -783,7 +790,7 @@ def libs_load(libs: list[str]) -> bool:
     return result.returncode == 0
 
 
-def run_version_command(cmd: list[str], regex: str) -> tuple[bool, str | None]:
+def run_version_command(cmd: list[str], regex: str, dev_tool: bool) -> tuple[bool, str | None]:
     """Runs a command found in PATH without the bin dir of pmg.
 
     Returns:
@@ -796,7 +803,18 @@ def run_version_command(cmd: list[str], regex: str) -> tuple[bool, str | None]:
         if entry and Path(entry).resolve() != bin_dir
     )
     executable = shutil.which(cmd[0], path=path)
-    if executable is None:
+    # the stubs of macOS only offer to install the developer tools, in a dialog when run
+    stub = (
+        executable is not None
+        and dev_tool
+        and platform.system() == "Darwin"
+        and executable.startswith("/usr/bin/")
+        and subprocess.run(
+            ["/usr/bin/xcode-select", "-p"], capture_output=True, check=False
+        ).returncode
+        != 0
+    )
+    if executable is None or stub:
         return False, None
     try:
         result = subprocess.run(  # noqa: S603
@@ -828,7 +846,7 @@ def find_external(name: str, pkg: Package) -> Record | None:
         cmd = [commands[0], *check.args]
     version = None
     if cmd is not None:
-        found, version = run_version_command(cmd, check.regex)
+        found, version = run_version_command(cmd, check.regex, check.dev_tool)
         if not found:
             return None
     return Record(
@@ -890,7 +908,8 @@ def resolve_install_order(names: list[str]) -> tuple[list[str], dict[str, Specif
         if name in seen:
             continue
         seen.add(name)
-        deps = requirements(load_spec(name).deps)
+        spec = load_spec(name)
+        deps = requirements(package_deps(spec, detect_platform(spec.min_glibc_version)))
         sorter.add(name, *(dep.name for dep in deps))
         for dep in deps:
             specifiers[dep.name] = specifiers.get(dep.name, SpecifierSet()) & dep.specifier
@@ -901,10 +920,21 @@ def resolve_install_order(names: list[str]) -> tuple[list[str], dict[str, Specif
         raise PmgError(f"dependency cycle: {' -> '.join(e.args[1])}") from e
 
 
-def dependency_vars(pkg: Package, records: dict[str, Record]) -> dict[str, dict[str, str]]:
-    """Returns the package dir and version of each dependency in use, for {{ deps }}."""
-    variables: dict[str, dict[str, str]] = {}
-    for dep in requirements(pkg.deps):
+def package_deps(pkg: Package, host: Platform) -> list[str]:
+    """Returns the dependencies of a package, with those for the platform of its assets."""
+    return [*pkg.deps, *pkg.platform_deps.get(host, [])]
+
+
+def dependency_vars(
+    pkg: Package, host: Platform, records: dict[str, Record]
+) -> dict[str, dict[str, str]]:
+    """Returns the package dir and version of each dependency in use, for {{ deps }}.
+
+    Dependencies not in use on the host, e.g. those of other platforms, are empty.
+    """
+    declared = [*pkg.deps, *(dep for deps in pkg.platform_deps.values() for dep in deps)]
+    variables = {Requirement(dep).name: {"dir": "", "version": ""} for dep in declared}
+    for dep in requirements(package_deps(pkg, host)):
         versions = [record for record in records.values() if record.name == dep.name]
         record = next((r for r in versions if r.active), None) or next(iter(versions), None)
         package_dir = ""
@@ -979,7 +1009,7 @@ def install_package(
             save_record(record)
         return
     context = make_context(name, pkg, tag)
-    context.deps = dependency_vars(pkg, records)
+    context.deps = dependency_vars(pkg, host, records)
     with target_layout(context) as target:
         archives = run_download(pkg, context, host, target.parent / "download")
         run_install(name, pkg, context, archives, target)
@@ -991,7 +1021,7 @@ def install_package(
             explicit=explicit,
             active=False,
             installed_at=time.time(),
-            deps=pkg.deps,
+            deps=package_deps(pkg, host),
             files=[str(dest) for _, dest in moves],
             dirs=[str(dest) for dest in dirs.values()],
         )
@@ -1166,7 +1196,9 @@ def needed_packages(
         if name in needed and needs_installing(
             name, tags, name in requested, specifiers.get(name, SpecifierSet())
         ):
-            needed |= {dep.name for dep in requirements(load_spec(name).deps)}
+            spec = load_spec(name)
+            deps = package_deps(spec, detect_platform(spec.min_glibc_version))
+            needed |= {dep.name for dep in requirements(deps)}
     return needed
 
 

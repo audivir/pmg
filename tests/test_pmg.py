@@ -505,8 +505,11 @@ def test_install_refuses_to_overwrite_foreign_file(env: Env) -> None:
 
 
 def test_failed_post_install_leaves_nothing(env: Env) -> None:
-    env.add_package("tool", post_install="exit 3")
-    assert "exit code 3" in env.pmg("install", "tool", ok=False).stderr
+    env.add_package("tool", post_install="echo build error >&2 && exit 3")
+    stderr = env.pmg("install", "tool", ok=False).stderr
+    # the output of a failing command is shown
+    assert "exit code 3" in stderr
+    assert "build error" in stderr
     assert not (env.bin / "tool").exists()
     assert env.installed() == {}
     assert list((env.pmg_home / "tmp").iterdir()) == []
@@ -550,8 +553,11 @@ def test_post_install_builds_from_content_with_spec_files(env: Env) -> None:
 
 
 def test_post_install_files_are_installed_and_tracked(env: Env) -> None:
-    env.add_package("tool", post_install='cp "$PREFIX/bin/tool" "$PREFIX/bin/tool-copy"')
-    env.pmg("install", "tool")
+    env.add_package(
+        "tool", post_install='echo warning >&2 && cp "$PREFIX/bin/tool" "$PREFIX/bin/tool-copy"'
+    )
+    # the output of a succeeding command is not
+    assert "warning" not in env.pmg("install", "tool").stderr
     assert env.run_bin("tool-copy") == "tool 1.0"
     env.pmg("uninstall", "tool")
     assert list(env.bin.iterdir()) == []
@@ -620,6 +626,22 @@ def test_env_and_paths(env: Env) -> None:
         check=True,
     )
     assert shell.stdout == f"tool 1.0\n{package_dir}\n"
+
+
+def test_platform_deps(env: Env) -> None:
+    host = detect_platform(None)
+    other = next(platform for platform in PLATFORMS if platform != host)
+    env.add_package("lib", spec=("content = true",))
+    env.add_package("unused")
+    env.add_package(
+        "app",
+        spec=(f'platform_deps = {{ {host} = ["lib"], {other} = ["unused"] }}',),
+        # the dependency of the other platform is there, but empty
+        post_install='echo "{{ deps.lib.version }} [{{ deps.unused.dir }}]" > "$PREFIX/dir/info"',
+    )
+    env.pmg("install", "app")
+    assert set(env.installed()) == {"app@v1.0", "lib@v1.0"}
+    assert (env.data / "app@v1.0" / "info").read_text() == "v1.0 []\n"
 
 
 def test_markers_in_deps(env: Env) -> None:

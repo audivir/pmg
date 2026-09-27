@@ -135,6 +135,9 @@ class Check(BaseStruct, kw_only=True):
     args: list[str] = msgspec.field(default_factory=lambda: ["--version"])
     regex: str = r"\d+(?:\.\d+)+"
     """Pattern whose first match in the output is the version."""
+    dev_tool: bool = False
+    """Whether macOS ships the command as a stub in /usr/bin, which only counts with the developer
+    tools installed."""
 
 
 class Package(BaseStruct, kw_only=True):
@@ -146,6 +149,8 @@ class Package(BaseStruct, kw_only=True):
     """Names of the packages this one needs, each optionally with a version specifier."""
     platforms: list[Platform] = []
     """Platforms the package is for, if not all; other hosts skip it as a dependency."""
+    platform_deps: dict[Platform, list[str]] = {}
+    """Extra dependencies when the package uses the assets of a platform."""
     external: External
     min_glibc: str | None = None
     """Oldest glibc for the glibc assets; older glibc hosts get the musl assets."""
@@ -194,7 +199,7 @@ class Package(BaseStruct, kw_only=True):
         Raises:
             ValueError: If a dependency, `min_glibc`, or the download repo is invalid.
         """
-        requirements(self.deps)
+        requirements([*self.deps, *(dep for deps in self.platform_deps.values() for dep in deps)])
         if self.min_glibc:
             Version(self.min_glibc)
         dl, rl = self.download, self.release
