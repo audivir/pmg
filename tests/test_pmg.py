@@ -292,10 +292,10 @@ def test_command_release_sets_the_version(env: Env) -> None:
     assert env.installed() == {"tool": "v2.5 explicit"}
 
 
-def test_release_command_without_output_fails(env: Env) -> None:
-    # like a pipeline whose curl is missing, but whose last command succeeds
+def test_failing_command_in_release_pipeline_fails(env: Env) -> None:
+    # like a missing curl in a pipeline whose last command succeeds
     env.add_package("tool", release='type = "command"\ncmd = "missing-command | cat"')
-    assert "printed no tag" in env.pmg("install", "tool", ok=False).stderr
+    assert "release command of tool failed" in env.pmg("install", "tool", ok=False).stderr
     assert env.installed() == {}
 
 

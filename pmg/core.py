@@ -429,21 +429,49 @@ def detect_platform(min_glibc: tuple[int, ...] | None) -> Platform:
     return host
 
 
-def fetch_release(pkg: Package) -> str:
+@functools.cache
+def spec_shell() -> str:
+    """Returns the shell for spec commands.
+
+    bash where available, as dash before 0.5.13 (Ubuntu 24.04) lacks pipefail. Alpine has no bash,
+    but its busybox sh has pipefail.
+    """
+    return shutil.which("bash") or "/bin/sh"
+
+
+def run_shell(name: str, step: str, cmd: str, cwd: Path | None = None, **env: str) -> str:
+    """Runs a spec command with `set -euo pipefail` and returns its output.
+
+    Raises:
+        PmgError: If the command fails.
+    """
+    try:
+        # spec commands are shell commands by design.
+        return subprocess.check_output(  # noqa: S602
+            f"set -euo pipefail\n{cmd}",
+            shell=True,
+            executable=spec_shell(),
+            cwd=cwd,
+            text=True,
+            env={**os.environ, **env},
+        )
+    except subprocess.CalledProcessError as e:
+        raise PmgError(f"{step} of {name} failed with exit code {e.returncode}") from e
+
+
+def fetch_release(name: str, pkg: Package) -> str:
     """Returns the latest tag.
 
     Raises:
-        PmgError: If a release command prints no tag.
+        PmgError: If a release command fails or prints no tag.
     """
     rl = pkg.release
     if isinstance(rl, GitHubRelease):
         return github_api().latest_release(*split_repo(rl.repo)).tag_name
     if isinstance(rl, CommandRelease):
-        # spec commands are shell commands by design.
-        tag = subprocess.check_output(rl.cmd, shell=True, text=True).strip()  # noqa: S602
-        # a failing command early in a pipeline goes unnoticed, but leaves the output empty.
-        if not tag:
-            raise PmgError(f"release command printed no tag: {rl.cmd}")
+        tag = run_shell(name, "release command", rl.cmd).strip()
+        if not tag:  # pragma: no cover
+            raise PmgError(f"release command of {name} printed no tag")
         return tag
     return rl.tag
 
@@ -522,20 +550,6 @@ def target_layout(context: Context) -> Generator[Path]:
         yield target
 
 
-def run_shell(name: str, step: str, cmd: str, target: Path, **env: str) -> str:
-    """Runs a spec command in the staging dir and returns its output.
-
-    Raises:
-        PmgError: If the command fails.
-    """
-    try:
-        return subprocess.check_output(  # noqa: S602
-            cmd, shell=True, cwd=target, text=True, env={**os.environ, "PREFIX": str(target), **env}
-        )
-    except subprocess.CalledProcessError as e:
-        raise PmgError(f"{step} of {name} failed with exit code {e.returncode}") from e
-
-
 def stage_files(
     pkg: Package, context: Context, content: Path, asset: str, target: Path
 ) -> list[tuple[str, Path]]:
@@ -589,10 +603,13 @@ def run_install(name: str, pkg: Package, context: Context, archive: Path, target
         (target / "dir").rmdir()
         shutil.move(content, target / "dir")
     if pkg.post_install:
-        run_shell(name, "post_install", render(pkg.post_install, context), target)
+        run_shell(
+            name, "post_install", render(pkg.post_install, context), target, PREFIX=str(target)
+        )
     staged_path = f"{target / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
     for cmd, dest in generated:
-        dest.write_text(run_shell(name, "completion", cmd, target, PATH=staged_path))
+        output = run_shell(name, "completion", cmd, target, PREFIX=str(target), PATH=staged_path)
+        dest.write_text(output)
 
 
 def track_installed_files(target: Path) -> list[Path]:
@@ -699,7 +716,7 @@ def install_package(name: str, explicit: bool) -> None:
             save_record(name, record)
         return
     pkg = load_spec(name)
-    tag = fetch_release(pkg)
+    tag = fetch_release(name, pkg)
     context = make_context(name, pkg, tag)
     host = detect_platform(pkg.min_glibc_tuple)
     with target_layout(context) as target:
@@ -732,11 +749,7 @@ def uninstall_package(name: str, record: Record) -> None:
     """
     pkg = load_spec(name) if name in available_specs() else None
     if pkg and pkg.uninstall:
-        hook = render(pkg.uninstall, make_context(name, pkg, record.tag))
-        try:
-            subprocess.check_call(hook, shell=True)  # noqa: S602
-        except subprocess.CalledProcessError as e:  # pragma: no cover
-            raise PmgError(f"uninstall of {name} failed with exit code {e.returncode}") from e
+        run_shell(name, "uninstall", render(pkg.uninstall, make_context(name, pkg, record.tag)))
     for path in [*record.files, *record.dirs]:
         remove_path(Path(path))
     record_path(name).unlink()
