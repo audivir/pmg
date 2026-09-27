@@ -1,0 +1,17 @@
+# the musl loader, which is also the libc, runs dynamic musl programs on glibc hosts; they need
+# `patchelf --set-interpreter {{ dir }}/lib/ld-musl-{{ arch }}.so.1`
+platforms = ["glibc_x64", "glibc_arm64"]
+content = true
+keep = ["lib/ld-musl-*.so.1"]
+check = { files = ["/lib/ld-musl-{{ arch }}.so.1"] }
+
+[external]
+apt = "musl"
+
+[release]
+type = "apk"
+package = "musl"
+
+[download]
+type = "apk"
+packages = ["musl"]
