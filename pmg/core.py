@@ -44,6 +44,7 @@ from packaging.version import Version
 from pmg.models import (
     ApkDownload,
     ApkRelease,
+    Check,
     CommandDownload,
     CommandRelease,
     CondaDownload,
@@ -830,20 +831,19 @@ def find_external(name: str, pkg: Package) -> Record | None:
     """Detects a copy of the package that pmg did not install.
 
     The files and libraries of the check must exist, and its command must run. Without any of
-    them, the first command of the package is looked up in PATH.
+    them, the first command of the package, or else its name, is looked up in PATH.
     """
     context = make_context(name, pkg, "external")
-    check = pkg.check
+    check = pkg.check or Check()
     files = [Path(render(file, context)) for file in check.files]
     libs = [render(lib, context) for lib in check.libs]
     if not all(file.exists() for file in files) or (libs and not libs_load(libs)):
         return None
     cmd = [render(arg, context) for arg in check.cmd] if check.cmd else None
     if cmd is None and not files and not libs:
-        commands = [*pkg.bin, *pkg.links]
-        if not commands:
-            return None
-        cmd = [commands[0], *check.args]
+        # packages that build their commands in post_install have none in the spec
+        command = next(iter([*pkg.bin, *pkg.links]), name)
+        cmd = [command, *check.args]
     version = None
     if cmd is not None:
         found, version = run_version_command(cmd, check.regex, check.dev_tool)

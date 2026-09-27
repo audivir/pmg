@@ -2,7 +2,6 @@ min_glibc = "2.18"
 bin = { bat = "bat" }
 man = ["bat.1"]
 completions.bat = { zsh = "autocomplete/bat.zsh", bash = "autocomplete/bat.bash", fish = "autocomplete/bat.fish" }
-check = {}
 
 [external]
 brew = "bat"

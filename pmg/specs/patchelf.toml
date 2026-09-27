@@ -3,7 +3,6 @@ platforms = ["glibc_x64", "glibc_arm64", "musl_x64", "musl_arm64"]
 bin = { patchelf = "bin/patchelf" }
 man = ["share/man/man1/patchelf.1"]
 completions.patchelf = { zsh = "share/zsh/site-functions/_patchelf" }
-check = {}
 
 [external]
 brew = "patchelf"

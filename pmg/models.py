@@ -131,7 +131,7 @@ class Check(BaseStruct, kw_only=True):
     """Libraries the dynamic loader must find."""
     cmd: list[str] | None = None
     """Command printing the version; without it, files, and libs, the first command of the
-    package with `args` is looked up in PATH."""
+    package, or else its name, with `args` is looked up in PATH."""
     args: list[str] = msgspec.field(default_factory=lambda: ["--version"])
     regex: str = r"\d+(?:\.\d+)+"
     """Pattern whose first match in the output is the version."""
@@ -173,7 +173,8 @@ class Package(BaseStruct, kw_only=True):
     """Paths of man pages in the archive; the file extension is the section."""
     completions: dict[str, Completions] = {}
     """Command mapped to its completion scripts."""
-    check: Check
+    check: Check | None = None
+    """How to detect a copy that pmg did not install; the defaults of `Check` if not set."""
     post_install: Command | None = None
     """Shell command run in the staging dir `PREFIX`, e.g. to patchelf or to build from source.
 

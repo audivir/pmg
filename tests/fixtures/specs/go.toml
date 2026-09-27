@@ -3,7 +3,7 @@ dir = "{{ data }}/golang"
 content = true
 env = { GOROOT = "{{ dir }}", GOPATH = "{{ data }}/go" }
 paths = ["{{ dir }}/bin", "{{ data }}/go/bin"]
-check = { cmd = ["go", "version"] }
+check = { args = ["version"] }
 
 [external]
 brew = "go"

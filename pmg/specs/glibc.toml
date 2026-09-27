@@ -14,7 +14,6 @@ remove = [
   "usr/share",
 ]
 post_install = 'cd "$PREFIX/dir" && ln -s lib64/ld-linux-*.so.* loader'
-check = {}
 
 [external]
 

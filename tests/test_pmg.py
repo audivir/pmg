@@ -159,7 +159,7 @@ class Env:
         files: dict[str, str] | None = None,
         spec: tuple[str, ...] = (),
         bin_entry: bool = True,
-        check: str = "{}",
+        check: str | None = None,
     ) -> None:
         script_bytes = (script or f"#!/bin/sh\necho {name} {version}\n").encode()
         if archive_format in {"tar.gz", "tar.zst"}:
@@ -184,6 +184,8 @@ class Env:
             bin_path = "{{ asset }}"
             (self.assets / f"{name}-{version}-linux").write_bytes(script_bytes)
         lines = [f"deps = {json.dumps(list(deps))}", *spec]
+        if check:
+            lines.append(f"check = {check}")
         if bin_entry:
             lines.append(f'bin = {{ {name} = "{bin_path}" }}')
         # TOML literal strings, so the shell commands need no escaping
@@ -194,7 +196,6 @@ class Env:
         if min_glibc:
             lines.append(f'min_glibc = "{min_glibc}"')
         lines += [
-            f"check = {check}",
             "[external]",
             "[release]",
             release or f'type = "static"\ntag = "v{version}"',
@@ -571,7 +572,6 @@ def test_dependency_cycle(env: Env) -> None:
 
 
 STATIC_TOOL_SPEC = """{fields}
-check = {{}}
 [external]
 [release]
 type = "static"
@@ -762,6 +762,14 @@ def test_external_command(env: Env) -> None:
     assert (env.system / "tool").exists()
 
 
+def test_external_package_found_by_name(env: Env) -> None:
+    # without commands in the spec, e.g. when post_install builds them, the name is the command
+    env.add_system_command("tool", "tool 2.0")
+    env.add_package("tool", bin_entry=False)
+    env.pmg("install", "tool")
+    assert env.installed() == {"tool@external": "explicit external 2.0"}
+
+
 def test_external_package_pulls_in_no_dependencies(env: Env) -> None:
     env.add_system_command("app", "app 2.0")
     env.add_package("lib")
@@ -801,7 +809,6 @@ def test_alpine_packages(env: Env) -> None:
         """content = true
 keep = ["usr/bin/*", "usr/lib/*"]
 links = { tool = "{{ dir }}/usr/bin/tool" }
-check = {}
 [external]
 [release]
 type = "apk"
@@ -860,7 +867,6 @@ def test_conda_package(env: Env) -> None:
         f"""content = "*-conda-linux-gnu/sysroot"
 remove = ["lib64/*.a", "usr/include"]
 post_install = 'cd "$PREFIX/dir" && ln -s lib64/libc.so.6 loader'
-check = {{}}
 [external]
 [release]
 type = "conda"

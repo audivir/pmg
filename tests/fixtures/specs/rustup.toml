@@ -3,7 +3,6 @@
 dirs = { cargo = "{{ data }}/cargo" }
 env = { RUSTUP_HOME = "{{ dir }}", CARGO_HOME = "{{ dirs.cargo }}" }
 paths = ["{{ dirs.cargo }}/bin"]
-check = { cmd = ["rustup", "--version"] }
 upgrade = "{{ dirs.cargo }}/bin/rustup self update"
 
 [external]
