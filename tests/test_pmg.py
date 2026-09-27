@@ -17,16 +17,17 @@ import sys
 import tarfile
 import threading
 import zipfile
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias, override
 
 import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 ArchiveFormat: TypeAlias = Literal["tar.gz", "zip", "bare"]
 
+FIXTURE_SPECS = Path(__file__).parent / "fixtures" / "specs"
 PLATFORMS = ("glibc_x64", "glibc_arm64", "musl_x64", "musl_arm64", "macos_arm64")
 
 
@@ -138,9 +139,13 @@ class Env:
         self.specs.mkdir(exist_ok=True)
         (self.specs / f"{name}.toml").write_text("\n".join(lines) + "\n")
 
-    def pmg(self, *args: str, ok: bool = True) -> subprocess.CompletedProcess[str]:
+    def pmg(
+        self, *args: str, ok: bool = True, specs_dir: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         env = clean_environ(self.home)
-        env |= {"PMG_HOME": str(self.pmg_home), "PMG_SPECS_DIR": str(self.specs)}
+        env["PMG_HOME"] = str(self.pmg_home)
+        if specs_dir:
+            env["PMG_SPECS_DIR"] = str(self.specs)
         result = subprocess.run(  # noqa: S603
             [sys.executable, "-m", "pmg", *args],
             env=env,
@@ -212,8 +217,7 @@ def test_specs_dir_comes_before_pmg_home(env: Env) -> None:
     env.pmg("install", "tool")
     assert env.run_bin("tool") == "tool 2.0"
     env.pmg("uninstall", "tool")
-    (env.specs / "tool.toml").unlink()
-    env.pmg("install", "tool")
+    env.pmg("install", "tool", specs_dir=False)
     assert env.run_bin("tool") == "tool 1.0"
 
 
@@ -330,8 +334,9 @@ def test_dependency_cycle(env: Env) -> None:
 
 
 @pytest.mark.skipif(os.getenv("PMG_OFFLINE") == "1", reason="PMG_OFFLINE=1")
-def test_install_bat_from_shipped_spec(tmp_path: Path) -> None:
+def test_install_bat_from_github(tmp_path: Path) -> None:
     env = clean_environ(tmp_path)
+    env["PMG_SPECS_DIR"] = str(FIXTURE_SPECS)
     subprocess.check_call([sys.executable, "-m", "pmg", "install", "bat"], env=env)
     bat = tmp_path / ".local" / "bin" / "bat"
     version = subprocess.check_output([bat, "--version"], text=True)  # noqa: S603
