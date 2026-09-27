@@ -20,6 +20,7 @@ import logging
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Annotated
 from urllib.parse import urlsplit
 
+import doctyper
 import jinja2
 import msgspec
 import zstandard
@@ -285,7 +287,9 @@ def spec_shell() -> str:
     return shutil.which("bash") or "/bin/sh"
 
 
-def run_shell(name: str, step: str, cmd: str, cwd: Path | None = None, **env: str) -> str:
+def run_shell(
+    name: str, step: str, cmd: str, cwd: Path | None = None, env: dict[str, str] | None = None
+) -> str:
     """Runs a spec command with `set -euo pipefail` and returns its output.
 
     Raises:
@@ -303,7 +307,7 @@ def run_shell(name: str, step: str, cmd: str, cwd: Path | None = None, **env: st
             env={
                 **os.environ,
                 "PATH": f"{layout()['bin']}{os.pathsep}{os.getenv('PATH', '')}",
-                **env,
+                **(env or {}),
             },
         )
     except subprocess.CalledProcessError as e:
@@ -423,8 +427,9 @@ def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath
     """
     dl_dir = Path(dl_dir)
     dl, tag = pkg.download, context.tag
-    if isinstance(dl, CommandDownload):  # pragma: no cover
-        raise NotImplementedError("CommandDownload not yet supported")
+    if isinstance(dl, CommandDownload):
+        # the command installs into the staging dir itself, see run_install
+        return []
     if isinstance(dl, ApkDownload):
         repo = alpine_repo()
         release = pkg.release.package if isinstance(pkg.release, ApkRelease) else None
@@ -575,22 +580,39 @@ def stage_files(
     return generated
 
 
+def package_env(pkg: Package, context: Context) -> dict[str, str]:
+    """Renders the environment of the package."""
+    return {key: render(value, context) for key, value in pkg.env.items()}
+
+
+def staged_context(context: Context, target: Path) -> Context:
+    """Returns the context with the package dirs in the staging dir."""
+    dirs = {key: target / "dirs" / key for key in context.dirs}
+    return msgspec.structs.replace(context, dir=target / "dir", dirs=dirs)
+
+
 def run_install(
     name: str, pkg: Package, context: Context, archives: list[Path], target: Path
 ) -> None:
     """Unpacks the archives and places the files and dirs of the package in the staging dir.
 
     Release archives lose a single top-level dir; Alpine and conda packages keep their layout.
+    A command download runs its command instead, with the environment of the package.
 
     Raises:
         PmgError: If a file is missing from the archives or a spec command fails.
     """
+    env = package_env(pkg, staged_context(context, target)) | {"PREFIX": str(target)}
+    if isinstance(pkg.download, CommandDownload):
+        run_shell(name, "download command", render(pkg.download.cmd, context), target, env)
     content = target.parent / "unpacked"
+    content.mkdir()
     for archive in archives:
         unpack(archive, content)
     if isinstance(pkg.download, GitHubDownload | UrlDownload):
         content = strip_single_dir(content)
-    generated = stage_files(pkg, context, content, archives[0].name, target)
+    asset = archives[0].name if archives else ""
+    generated = stage_files(pkg, context, content, asset, target)
     if pkg.content:
         root = content
         if isinstance(pkg.content, str):
@@ -602,13 +624,12 @@ def run_install(
         shutil.move(root, target / "dir")
         prune(target / "dir", pkg.keep, pkg.remove)
     if pkg.post_install:
-        run_shell(
-            name, "post_install", render(pkg.post_install, context), target, PREFIX=str(target)
-        )
-    staged_path = f"{target / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+        run_shell(name, "post_install", render(pkg.post_install, context), target, env)
+    staged_path = (
+        f"{target / 'bin'}{os.pathsep}{layout()['bin']}{os.pathsep}{os.getenv('PATH', '')}"
+    )
     for cmd, dest in generated:
-        output = run_shell(name, "completion", cmd, target, PREFIX=str(target), PATH=staged_path)
-        dest.write_text(output)
+        dest.write_text(run_shell(name, "completion", cmd, target, env | {"PATH": staged_path}))
 
 
 def track_installed_files(target: Path) -> list[Path]:
@@ -873,6 +894,20 @@ def resolve_install_order(names: list[str]) -> tuple[list[str], dict[str, Specif
         raise PmgError(f"dependency cycle: {' -> '.join(e.args[1])}") from e
 
 
+def dependency_vars(pkg: Package, records: dict[str, Record]) -> dict[str, dict[str, str]]:
+    """Returns the package dir and version of each dependency in use, for {{ deps }}."""
+    variables: dict[str, dict[str, str]] = {}
+    for dep in requirements(pkg.deps):
+        versions = [record for record in records.values() if record.name == dep.name]
+        record = next((r for r in versions if r.active), None) or next(iter(versions), None)
+        package_dir = ""
+        if record is not None and not record.external:
+            package_dir = str(make_context(dep.name, load_spec(dep.name), record.tag).dir)
+        version = (record.version_tag or "") if record is not None else ""
+        variables[dep.name] = {"dir": package_dir, "version": version}
+    return variables
+
+
 def nothing_to_install(  # noqa: PLR0913, PLR0917
     name: str,
     pkg: Package,
@@ -937,6 +972,7 @@ def install_package(
             save_record(record)
         return
     context = make_context(name, pkg, tag)
+    context.deps = dependency_vars(pkg, records)
     with target_layout(context) as target:
         archives = run_download(pkg, context, host, target.parent / "download")
         run_install(name, pkg, context, archives, target)
@@ -980,7 +1016,8 @@ def uninstall_version(record: Record) -> None:
     # external versions only lose their record
     if pkg and pkg.uninstall and not record.external:
         context = make_context(record.name, pkg, record.tag)
-        run_shell(record.name, "uninstall", render(pkg.uninstall, context))
+        env = package_env(pkg, context)
+        run_shell(record.name, "uninstall", render(pkg.uninstall, context), env=env)
     if record.active:
         unlink_active(record)
     for path in [*record.files, *record.dirs]:
@@ -1055,6 +1092,36 @@ def find_orphans(records: dict[str, Record]) -> list[str]:
             dep.name for r in records.values() if r.name == name for dep in requirements(r.deps)
         )
     return sorted(key for key, record in records.items() if record.name not in required)
+
+
+def upgrade_package(name: str) -> None:
+    """Upgrades the active version of a package to the latest release.
+
+    Packages with an upgrade command update in place. Others get the latest release next to the
+    active version, which it replaces unless a dependent still needs it.
+    """
+    records = load_records()
+    active = active_version(records, name)
+    # external versions, which are never active, are left to their package manager
+    if active is None:
+        return
+    pkg = load_spec(name)
+    context = make_context(name, pkg, active.tag)
+    if pkg.upgrade:
+        run_shell(name, "upgrade", render(pkg.upgrade, context), env=package_env(pkg, context))
+        logger.info("upgraded %s in place", name)
+        return
+    latest = fetch_release(name, pkg, detect_platform(pkg.min_glibc_version))
+    if latest == active.tag:
+        logger.info("%s %s is up to date", name, latest)
+        return
+    install_package(name, explicit=active.explicit, tag=latest)
+    records = load_records()
+    activate(records[f"{name}@{latest}"], records)
+    try:
+        uninstall_packages([active.key])
+    except PmgError as e:
+        logger.info("kept %s: %s", active.key, e)
 
 
 @contextlib.contextmanager
@@ -1132,6 +1199,32 @@ def autoremove() -> None:
     with exit_on_error():
         if orphans := find_orphans(load_records()):
             uninstall_packages(orphans)
+
+
+def upgrade(names: Annotated[list[str] | None, doctyper.Argument()] = None) -> None:
+    """Upgrades packages to their latest release.
+
+    Args:
+        names: Names of the packages to upgrade, all installed ones if none are given.
+    """
+    with exit_on_error():
+        for name in sorted(set(names or (record.name for record in load_records().values()))):
+            upgrade_package(name)
+
+
+def print_env() -> None:
+    """Prints shell code setting the environment and PATH entries of the active versions."""
+    paths: list[str] = []
+    for record in load_records().values():
+        if not record.active or record.name not in available_specs():
+            continue
+        pkg = load_spec(record.name)
+        context = make_context(record.name, pkg, record.tag)
+        for key, value in package_env(pkg, context).items():
+            print(f"export {key}={shlex.quote(value)}")  # noqa: T201
+        paths += [render(path, context) for path in pkg.paths]
+    if paths:
+        print(f'export PATH={shlex.quote(os.pathsep.join(paths))}:"$PATH"')  # noqa: T201
 
 
 def use(name: str) -> None:

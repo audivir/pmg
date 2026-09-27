@@ -549,6 +549,129 @@ def test_dependency_cycle(env: Env) -> None:
     assert env.installed() == {}
 
 
+STATIC_TOOL_SPEC = """{fields}
+check = {{}}
+[external]
+[release]
+type = "static"
+tag = "v1.0"
+[download]
+{download}
+[assets]
+"""
+
+
+def test_command_download(env: Env) -> None:
+    # the command writes into the package dir, which is in the staging dir during the install
+    command = (
+        'test "$TOOL_HOME" = "$PREFIX/dir" && mkdir "$TOOL_HOME/bin" && '
+        'printf "#!/bin/sh\\necho from command\\n" > "$TOOL_HOME/bin/tool" && '
+        'chmod +x "$TOOL_HOME/bin/tool"'
+    )
+    env.write_spec(
+        "tool",
+        STATIC_TOOL_SPEC.format(
+            fields='env = { TOOL_HOME = "{{ dir }}" }\nlinks = { tool = "{{ dir }}/bin/tool" }',
+            download=f"type = \"command\"\ncmd = '{command}'",
+        ),
+    )
+    env.pmg("install", "tool")
+    assert env.run_bin("tool") == "from command"
+    assert (env.data / "tool@v1.0" / "bin" / "tool").exists()
+
+
+def test_env_and_paths(env: Env) -> None:
+    # external versions are never active, so they print nothing
+    env.add_system_command("other", "other 3.1")
+    env.add_package("other", spec=('env = { OTHER = "x" }',))
+    env.pmg("install", "other")
+    assert env.pmg("env").stdout == ""
+    env.add_package(
+        "tool",
+        bin_entry=False,
+        spec=("content = true", 'env = { TOOL_HOME = "{{ dir }}" }', 'paths = ["{{ dir }}/bin"]'),
+        post_install='test "$TOOL_HOME" = "$PREFIX/dir"',
+    )
+    env.pmg("install", "tool")
+    package_dir = env.data / "tool@v1.0"
+    output = env.pmg("env").stdout
+    assert output == f'export TOOL_HOME={package_dir}\nexport PATH={package_dir}/bin:"$PATH"\n'
+    # the printed code sets up a shell that finds the command
+    shell = subprocess.run(  # noqa: S603
+        ["/bin/sh", "-c", f'{output}tool && echo "$TOOL_HOME"'],
+        env={"PATH": "/usr/bin:/bin"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert shell.stdout == f"tool 1.0\n{package_dir}\n"
+
+
+def test_markers_in_deps(env: Env) -> None:
+    env.add_package("lib")
+    env.add_package("other")
+    deps = (f"lib; sys_platform == '{sys.platform}'", "other; sys_platform == 'none'")
+    env.add_package("app", deps=deps)
+    env.pmg("install", "app")
+    assert set(env.installed()) == {"app@v1.0", "lib@v1.0"}
+
+
+@pytest.mark.parametrize("external", [False, True])
+def test_dependency_template_variables(env: Env, external: bool) -> None:
+    if external:
+        env.add_system_command("lib", "lib 3.1")
+    env.add_package("lib", spec=("content = true",))
+    env.add_package(
+        "app",
+        deps=("lib",),
+        post_install='echo "{{ deps.lib.dir }} {{ deps.lib.version }}" > "$PREFIX/dir/lib-info"',
+    )
+    env.pmg("install", "app")
+    info = (env.data / "app@v1.0" / "lib-info").read_text()
+    # an external dependency has no package dir
+    assert info == (" 3.1\n" if external else f"{env.data / 'lib@v1.0'} v1.0\n")
+
+
+def test_upgrade_replaces_active_version(env: Env) -> None:
+    env.add_package("tool", version="1.0")
+    env.pmg("install", "tool")
+    env.add_package("tool", version="2.0")
+    env.pmg("upgrade")
+    assert env.installed() == {"tool@v2.0": "explicit active"}
+    assert env.run_bin("tool") == "tool 2.0"
+    assert "tool v2.0 is up to date" in env.pmg("upgrade", "tool").stderr
+
+
+def test_upgrade_keeps_version_a_dependent_needs(env: Env) -> None:
+    env.add_package("tool", version="1.0")
+    env.add_package("app", deps=("tool<2",))
+    env.pmg("install", "app")
+    env.add_package("tool", version="2.0")
+    assert "kept tool@v1.0: app depends on tool<2" in env.pmg("upgrade", "tool").stderr
+    assert env.installed() == {
+        "app@v1.0": "explicit active",
+        "tool@v1.0": "dependency",
+        "tool@v2.0": "dependency active",
+    }
+
+
+def test_upgrade_in_place_and_external(env: Env) -> None:
+    env.add_system_command("other", "other 3.1")
+    env.add_package("other")
+    env.add_package(
+        "tool",
+        spec=("content = true", """upgrade = 'echo upgraded > "{{ dir }}/marker"'"""),
+    )
+    env.pmg("install", "tool", "other")
+    env.pmg("upgrade")
+    assert (env.data / "tool@v1.0" / "marker").read_text() == "upgraded\n"
+    # external versions are left to their package manager
+    assert env.installed() == {
+        "other@external": "explicit external 3.1",
+        "tool@v1.0": "explicit active",
+    }
+
+
 def test_content_subdir_with_keep_and_remove(env: Env) -> None:
     env.add_package(
         "tool",

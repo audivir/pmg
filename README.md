@@ -44,8 +44,8 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
 - Templates can use `{{ tag }}`, `{{ version }}` (the tag without a leading `v`), `{{ asset }}`,
   `{{ arch }}` (as `uname -m` prints it), `{{ data }}` (`$XDG_DATA_HOME`), `{{ bin }}`, `{{ dir }}`,
   and `{{ dirs.<key> }}`.
-- `release` and `download` are of the type `github`, `url`, `command` (release only), `static`
-  (release only), `apk` (packages of the main Alpine repo, of the host release or else
+- `release` and `download` are of the type `github`, `url`, `command` (a command printing the tag,
+  or installing into the staging directory), `static` (release only), `apk` (packages of the main Alpine repo, of the host release or else
   latest-stable), or `conda` (the newest `.conda` file of the asset package in a channel).
 - glibc hosts older than `min_glibc` get the musl asset. `platforms` limits a package to some
   platforms, other hosts skip it as a dependency.
@@ -63,7 +63,15 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
   `libs`, and `cmd` must run. Without them, the first command of the package runs with `args`
   (`--version`). The version is the first match of `regex` in the output. Such an external version
   satisfies dependencies and is only recorded, pmg leaves its files alone.
-- `post_install` runs a shell command in the staging directory `PREFIX`.
+- `post_install` runs a shell command in the staging directory `PREFIX`, `uninstall` before the
+  files are removed, and `upgrade` updates a package in place that updates itself. Spec commands
+  run with `set -euo pipefail` and the bin directory in `PATH`.
+- `env` sets environment variables for the spec commands and, with `paths` as `PATH` entries, for
+  the shell through `pmg env`. During an install, `{{ dir }}` and `{{ dirs.<key> }}` point to the
+  staging directory there.
+- `deps` entries can have environment markers like `"lib; sys_platform == 'linux'"`. In
+  templates, `{{ deps["lib"].dir }}` and `{{ deps["lib"].version }}` are the package directory and
+  version of a dependency in use, the directory is empty for an external one.
 
 Packages share this layout:
 
@@ -88,7 +96,9 @@ python -m pmg install bat@v0.25.0
 python -m pmg use bat@v0.25.0
 python -m pmg list
 python -m pmg uninstall bat@v0.25.0
+python -m pmg upgrade
 python -m pmg autoremove
+eval "$(python -m pmg env)"
 ```
 
 - `install` installs the latest release. `name@tag` installs the release with that tag, written as
@@ -103,7 +113,11 @@ python -m pmg autoremove
 - `uninstall` removes all versions of a package, or one given as `name@tag`. It refuses if a
   remaining package would miss a dependency. If the active version goes, the most recently
   installed of the others becomes active.
+- `upgrade` installs the latest release of each active version next to it and makes it active. The
+  old version goes unless a dependent still needs it. Packages with an `upgrade` command update in
+  place, external versions are left to their package manager.
 - `autoremove` removes dependencies that no directly installed package needs anymore.
+- `env` prints shell code setting the environment and `PATH` entries of the active versions.
 - `list` shows each installed version, whether it was installed directly or as a dependency, and
   whether it is active.
 - Set `PMG_GH_TOKEN` (or `GH_TOKEN`) to avoid the rate limit of the GitHub API.

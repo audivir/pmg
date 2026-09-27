@@ -15,5 +15,3 @@ package = "musl"
 [download]
 type = "apk"
 packages = ["musl"]
-
-[assets]

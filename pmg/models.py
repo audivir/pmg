@@ -149,7 +149,7 @@ class Package(BaseStruct, kw_only=True):
     external: External
     min_glibc: str | None = None
     """Oldest glibc for the glibc assets; older glibc hosts get the musl assets."""
-    assets: Assets
+    assets: Assets = {}
     dir: str | None = None
     """Package dir, if not {{ data }}/<name>."""
     dirs: dict[str, str] = {}
@@ -176,6 +176,15 @@ class Package(BaseStruct, kw_only=True):
     """
     uninstall: Command | None = None
     """Shell command for extra cleanup, run before the installed files are removed."""
+    upgrade: Command | None = None
+    """Shell command updating the package in place, for packages that update themselves."""
+    env: dict[str, str] = {}
+    """Environment of the spec commands and, printed by `pmg env`, of the shell.
+
+    During an install, {{ dir }} and {{ dirs.<key> }} point to the staging dir.
+    """
+    paths: list[str] = []
+    """PATH entries printed by `pmg env`, e.g. for commands the package installs itself."""
 
     def __post_init__(self) -> None:
         """Validates the dependencies and `min_glibc`, and takes the download repo from the release.
@@ -241,6 +250,8 @@ class Context(msgspec.Struct, kw_only=True):
     bin: Path
     dir: Path
     dirs: dict[str, Path]
+    deps: dict[str, dict[str, str]] = {}
+    """Package dir and version of each dependency in use, empty if external or skipped."""
 
     def variables(self) -> dict[str, object]:
         """Template variables, with paths as strings."""
@@ -252,6 +263,7 @@ class Context(msgspec.Struct, kw_only=True):
             "bin": str(self.bin),
             "dir": str(self.dir),
             "dirs": {key: str(path) for key, path in self.dirs.items()},
+            "deps": self.deps,
         }
 
 
@@ -282,16 +294,24 @@ class GitHubReleaseInfo(msgspec.Struct, kw_only=True):
 
 
 def requirements(deps: list[str]) -> list[Requirement]:
-    """Parses dependencies like "lib" or "lib>=1.2,<2".
+    """Parses dependencies like "lib>=1.2,<2" or "lib; sys_platform == 'linux'" for the host.
+
+    Dependencies whose environment marker does not match the host are left out.
 
     Raises:
-        ValueError: If a dependency is invalid or has extras, markers, or a URL.
+        ValueError: If a dependency is invalid or has extras or a URL.
     """
     parsed = [Requirement(dep) for dep in deps]
     for requirement in parsed:
-        if requirement.extras or requirement.marker or requirement.url:  # pragma: no cover
-            raise ValueError(f"only a name and a version specifier are allowed: {requirement}")
-    return parsed
+        if requirement.extras or requirement.url:  # pragma: no cover
+            raise ValueError(
+                f"only a name, a version specifier, and a marker are allowed: {requirement}"
+            )
+    return [
+        requirement
+        for requirement in parsed
+        if not requirement.marker or requirement.marker.evaluate()
+    ]
 
 
 def tag_version(tag: str) -> Version | None:
