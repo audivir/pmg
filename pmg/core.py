@@ -1,9 +1,9 @@
 """Resolving, installing, and uninstalling packages from their specs.
 
-Package specs are TOML files named after the package in `PMG_SPECS_DIR`, by default
-`$XDG_CONFIG_HOME/pmg/specs`. Templates in a spec are Jinja templates with {{ tag }} (the release
-tag, e.g. "v0.26.1"), {{ version }} (the tag without a leading "v"), and {{ asset }} (the asset
-file name).
+Package specs are TOML files named after the package, searched in `$PMG_SPECS_DIR`, then in
+`$PMG_HOME/specs`, then in the specs shipped with pmg. Templates in a spec are Jinja templates with
+{{ tag }} (the release tag, e.g. "v0.26.1"), {{ version }} (the tag without a leading "v"), and
+{{ asset }} (the asset file name).
 """
 
 from __future__ import annotations
@@ -213,16 +213,28 @@ class Files(SyncConsumer):
         """Binds the download of a path on the host."""
 
 
-def spec_dir() -> Path:
-    """Returns the directory of the package specs."""
-    if specs := os.getenv("PMG_SPECS_DIR"):
-        return Path(specs)
-    return Path(os.getenv("XDG_CONFIG_HOME") or Path.home() / ".config") / "pmg" / "specs"
-
-
-def state_dir() -> Path:
-    """Returns the directory of the install records and the staging dirs."""
+def pmg_home() -> Path:
+    """Returns the directory of the install records, the staging dirs, and the user specs."""
+    if home := os.getenv("PMG_HOME"):
+        return Path(home)
     return Path(os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "pmg"
+
+
+def spec_dirs() -> list[Path]:
+    """Returns the directories searched for specs, in order."""
+    dirs = [pmg_home() / "specs", Path(__file__).parent / "specs"]
+    if specs := os.getenv("PMG_SPECS_DIR"):
+        dirs.insert(0, Path(specs))
+    return dirs
+
+
+def available_specs() -> dict[str, Path]:
+    """Maps each package name to its spec, with earlier spec directories taking precedence."""
+    specs: dict[str, Path] = {}
+    # later entries override earlier ones, so the dirs go from back to front.
+    for directory in reversed(spec_dirs()):
+        specs |= {path.stem: path for path in sorted(directory.glob("*.toml"))}
+    return specs
 
 
 def layout() -> dict[str, Path]:
@@ -241,9 +253,10 @@ def load_spec(name: str) -> Package:
     Raises:
         PmgError: If the spec is missing or invalid.
     """
-    path = spec_dir() / f"{name}.toml"
-    if not path.is_file():  # pragma: no cover
-        raise PmgError(f"no spec for {name} in {path.parent}")
+    path = available_specs().get(name)
+    if path is None:  # pragma: no cover
+        dirs = ", ".join(str(directory) for directory in spec_dirs())
+        raise PmgError(f"no spec for {name} in {dirs}")
     try:
         return decode(path.read_text())
     except msgspec.ValidationError as e:  # pragma: no cover
@@ -252,12 +265,12 @@ def load_spec(name: str) -> Package:
 
 def record_path(name: str) -> Path:
     """Returns the path of the install record of a package."""
-    return state_dir() / "installed" / f"{name}.json"
+    return pmg_home() / "installed" / f"{name}.json"
 
 
 def load_records() -> dict[str, Record]:
     """Loads the install records of all installed packages."""
-    records_dir = state_dir() / "installed"
+    records_dir = pmg_home() / "installed"
     if not records_dir.is_dir():
         return {}
     return {
@@ -405,7 +418,7 @@ def unpack(archive: Path, dest: Path) -> Path:
 @contextlib.contextmanager
 def target_layout() -> Generator[Path]:
     """Creates a staging dir with the install layout, next to the installed files."""
-    staging_root = state_dir() / "tmp"
+    staging_root = pmg_home() / "tmp"
     staging_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=staging_root) as tmp:
         target = Path(tmp) / "target"
@@ -549,8 +562,7 @@ def uninstall_package(name: str, record: Record) -> None:
     Raises:
         PmgError: If the uninstall hook fails.
     """
-    spec_path = spec_dir() / f"{name}.toml"
-    hook = load_spec(name).uninstall if spec_path.is_file() else None
+    hook = load_spec(name).uninstall if name in available_specs() else None
     if hook:
         try:
             subprocess.check_call(hook, shell=True)  # noqa: S602

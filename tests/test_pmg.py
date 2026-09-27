@@ -17,18 +17,27 @@ import sys
 import tarfile
 import threading
 import zipfile
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias, override
 
 import pytest
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
 ArchiveFormat: TypeAlias = Literal["tar.gz", "zip", "bare"]
 
-FIXTURE_SPECS = Path(__file__).parent / "fixtures" / "specs"
 PLATFORMS = ("glibc_x64", "glibc_arm64", "musl_x64", "musl_arm64", "macos_arm64")
+
+
+def clean_environ(home: Path) -> dict[str, str]:
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("XDG_", "PMG_HOME", "PMG_SPECS_DIR"))
+    }
+    env["HOME"] = str(home)
+    return env
 
 
 class QuietHandler(http.server.SimpleHTTPRequestHandler):
@@ -68,8 +77,8 @@ class Env:
         return self.home / ".local" / "bin"
 
     @property
-    def state(self) -> Path:
-        return self.home / ".local" / "share" / "pmg"
+    def pmg_home(self) -> Path:
+        return self.root / "pmg-home"
 
     def add_package(  # noqa: PLR0913
         self,
@@ -129,17 +138,9 @@ class Env:
         self.specs.mkdir(exist_ok=True)
         (self.specs / f"{name}.toml").write_text("\n".join(lines) + "\n")
 
-    def pmg(
-        self, *args: str, ok: bool = True, default_specs: bool = False
-    ) -> subprocess.CompletedProcess[str]:
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith(("XDG_", "PMG_SPECS_DIR"))
-        }
-        env["HOME"] = str(self.home)
-        if not default_specs:
-            env["PMG_SPECS_DIR"] = str(self.specs)
+    def pmg(self, *args: str, ok: bool = True) -> subprocess.CompletedProcess[str]:
+        env = clean_environ(self.home)
+        env |= {"PMG_HOME": str(self.pmg_home), "PMG_SPECS_DIR": str(self.specs)}
         result = subprocess.run(  # noqa: S603
             [sys.executable, "-m", "pmg", *args],
             env=env,
@@ -202,12 +203,17 @@ def test_old_glibc_gets_musl_asset(env: Env) -> None:
     assert env.run_bin("tool") == "tool 1.0"
 
 
-def test_default_spec_dir(env: Env) -> None:
-    env.add_package("tool")
-    default_specs = env.home / ".config" / "pmg" / "specs"
-    default_specs.mkdir(parents=True)
-    shutil.move(env.specs / "tool.toml", default_specs / "tool.toml")
-    env.pmg("install", "tool", default_specs=True)
+def test_specs_dir_comes_before_pmg_home(env: Env) -> None:
+    env.add_package("tool", version="1.0")
+    home_specs = env.pmg_home / "specs"
+    home_specs.mkdir(parents=True)
+    shutil.move(env.specs / "tool.toml", home_specs / "tool.toml")
+    env.add_package("tool", version="2.0")
+    env.pmg("install", "tool")
+    assert env.run_bin("tool") == "tool 2.0"
+    env.pmg("uninstall", "tool")
+    (env.specs / "tool.toml").unlink()
+    env.pmg("install", "tool")
     assert env.run_bin("tool") == "tool 1.0"
 
 
@@ -283,7 +289,7 @@ def test_failed_post_install_leaves_nothing(env: Env) -> None:
     assert "exit code 3" in env.pmg("install", "tool", ok=False).stderr
     assert not (env.bin / "tool").exists()
     assert env.installed() == {}
-    assert list((env.state / "tmp").iterdir()) == []
+    assert list((env.pmg_home / "tmp").iterdir()) == []
 
 
 def test_failed_move_removes_files_moved_before(env: Env) -> None:
@@ -301,9 +307,9 @@ def test_failed_move_removes_files_moved_before(env: Env) -> None:
 
 def test_failed_record_write_removes_installed_files(env: Env) -> None:
     env.add_package("tool")
-    env.state.mkdir(parents=True)
+    env.pmg_home.mkdir(parents=True)
     # a file where the dir of the records belongs
-    (env.state / "installed").write_text("")
+    (env.pmg_home / "installed").write_text("")
     env.pmg("install", "tool", ok=False)
     assert not (env.bin / "tool").exists()
 
@@ -324,9 +330,8 @@ def test_dependency_cycle(env: Env) -> None:
 
 
 @pytest.mark.skipif(os.getenv("PMG_OFFLINE") == "1", reason="PMG_OFFLINE=1")
-def test_install_bat_from_github(tmp_path: Path) -> None:
-    env = {key: value for key, value in os.environ.items() if not key.startswith("XDG_")}
-    env |= {"HOME": str(tmp_path), "PMG_SPECS_DIR": str(FIXTURE_SPECS)}
+def test_install_bat_from_shipped_spec(tmp_path: Path) -> None:
+    env = clean_environ(tmp_path)
     subprocess.check_call([sys.executable, "-m", "pmg", "install", "bat"], env=env)
     bat = tmp_path / ".local" / "bin" / "bat"
     version = subprocess.check_output([bat, "--version"], text=True)  # noqa: S603
