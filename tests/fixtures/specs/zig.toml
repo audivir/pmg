@@ -1,0 +1,23 @@
+# zig finds its lib dir relative to the real path of its binary, so bin gets a symlink
+dirs = { zig = "{{ data }}/zig" }
+content = "zig"
+links = { zig = "{{ dirs.zig }}/zig" }
+check = { cmd = ["{{ bin }}/zig", "version"] }
+
+[external]
+brew = "zig"
+
+[release]
+type = "command"
+cmd = "curl -fsSL https://ziglang.org/download/index.json | grep -o 'https://ziglang.org/download/[0-9.]*/' | awk -F/ 'NR == 1 {print $5}'"
+
+[download]
+type = "url"
+url = "https://ziglang.org/download/{{ version }}/{{ asset }}"
+
+[assets]
+glibc_x64 = "zig-x86_64-linux-{{ version }}.tar.xz"
+glibc_arm64 = "zig-aarch64-linux-{{ version }}.tar.xz"
+musl_x64 = "zig-x86_64-linux-{{ version }}.tar.xz"
+musl_arm64 = "zig-aarch64-linux-{{ version }}.tar.xz"
+macos_arm64 = "zig-aarch64-macos-{{ version }}.tar.xz"
