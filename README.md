@@ -63,9 +63,11 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
   `libs`, and `cmd` must run. Without them, the first command of the package runs with `args`
   (`--version`). The version is the first match of `regex` in the output. Such an external version
   satisfies dependencies and is only recorded, pmg leaves its files alone.
-- `post_install` runs a shell command in the staging directory `PREFIX`, `uninstall` before the
-  files are removed, and `upgrade` updates a package in place that updates itself. Spec commands
-  run with `set -euo pipefail` and the bin directory in `PATH`.
+- `post_install` runs a shell command in the staging directory `PREFIX`, with the unpacked archive
+  in `CONTENT`, e.g. to build from source. `{{ spec_dir }}` is the directory of the spec, for files
+  shipped next to it. `uninstall` runs before the files are removed, and `upgrade` updates a
+  package in place that updates itself. Spec commands run with `set -euo pipefail` and the bin
+  directory in `PATH`.
 - `env` sets environment variables for the spec commands and, with `paths` as `PATH` entries, for
   the shell through `pmg env`. During an install, `{{ dir }}` and `{{ dirs.<key> }}` point to the
   staging directory there.

@@ -170,7 +170,9 @@ class Package(BaseStruct, kw_only=True):
     """Command mapped to its completion scripts."""
     check: Check
     post_install: Command | None = None
-    """Shell command run in the staging dir `PREFIX`, e.g. to patchelf.
+    """Shell command run in the staging dir `PREFIX`, e.g. to patchelf or to build from source.
+
+    `CONTENT` is the unpacked archive, or the package dir if it became that.
 
     The staging dir has `bin`, `man`, `zsh`, `bash`, `fish`, `dir`, and `dirs/<key>`.
     """
@@ -250,6 +252,8 @@ class Context(msgspec.Struct, kw_only=True):
     bin: Path
     dir: Path
     dirs: dict[str, Path]
+    spec_dir: Path
+    """Dir of the spec, for files shipped next to it."""
     deps: dict[str, dict[str, str]] = {}
     """Package dir and version of each dependency in use, empty if external or skipped."""
 
@@ -263,6 +267,7 @@ class Context(msgspec.Struct, kw_only=True):
             "bin": str(self.bin),
             "dir": str(self.dir),
             "dirs": {key: str(path) for key, path in self.dirs.items()},
+            "spec_dir": str(self.spec_dir),
             "deps": self.deps,
         }
 

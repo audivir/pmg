@@ -170,12 +170,17 @@ def make_context(name: str, pkg: Package, tag: str) -> Context:
     """Resolves the template variables of a package."""
     data, bin_dir = data_home(), layout()["bin"]
     arch = platform.machine()
-    base = Context(tag=tag, arch=arch, data=data, bin=bin_dir, dir=data / name, dirs={})
+    spec = available_specs().get(name)
+    spec_dir = spec.parent if spec else Path()
+    base = Context(
+        tag=tag, arch=arch, data=data, bin=bin_dir, dir=data / name, dirs={}, spec_dir=spec_dir
+    )
     return Context(
         tag=tag,
         arch=arch,
         data=data,
         bin=bin_dir,
+        spec_dir=spec_dir,
         dir=versioned(Path(render(pkg.dir, base)) if pkg.dir else base.dir, tag),
         dirs={key: Path(render(value, base)) for key, value in pkg.dirs.items()},
     )
@@ -623,6 +628,8 @@ def run_install(
         (target / "dir").rmdir()
         shutil.move(root, target / "dir")
         prune(target / "dir", pkg.keep, pkg.remove)
+        content = target / "dir"
+    env["CONTENT"] = str(content)
     if pkg.post_install:
         run_shell(name, "post_install", render(pkg.post_install, context), target, env)
     staged_path = (

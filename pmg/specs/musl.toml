@@ -1,6 +1,7 @@
 # the musl loader, which is also the libc, runs dynamic musl programs on glibc hosts; they need
 # `patchelf --set-interpreter {{ dir }}/lib/ld-musl-{{ arch }}.so.1`
 platforms = ["glibc_x64", "glibc_arm64"]
+deps = ["patchelf"]
 content = true
 keep = ["lib/ld-musl-*.so.1"]
 check = { files = ["/lib/ld-musl-{{ arch }}.so.1"] }

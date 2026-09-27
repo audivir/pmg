@@ -1,6 +1,7 @@
 # user-space glibc for musl hosts, from the sysroot conda-forge builds against; glibc programs need
 # `patchelf --set-interpreter {{ dir }}/loader`
 platforms = ["musl_x64", "musl_arm64"]
+deps = ["patchelf"]
 content = "*-conda-linux-gnu/sysroot"
 # only the shared libraries are needed at runtime; glibc reads locales and gconv modules from the
 # host's /usr/lib/locale and /usr/lib64/gconv, not from here

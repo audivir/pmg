@@ -534,6 +534,21 @@ def test_failed_record_write_removes_installed_files(env: Env) -> None:
     assert not (env.bin / "tool").exists()
 
 
+def test_post_install_builds_from_content_with_spec_files(env: Env) -> None:
+    env.add_package(
+        "tool",
+        files={"src/tool.in": "#!/bin/sh\necho built\n"},
+        bin_entry=False,
+        post_install=(
+            'cat "$CONTENT/src/tool.in" "{{ spec_dir }}/tool.extra" > "$PREFIX/bin/tool" && '
+            'chmod +x "$PREFIX/bin/tool"'
+        ),
+    )
+    (env.specs / "tool.extra").write_text("echo from spec dir\n")
+    env.pmg("install", "tool")
+    assert env.run_bin("tool") == "built\nfrom spec dir"
+
+
 def test_post_install_files_are_installed_and_tracked(env: Env) -> None:
     env.add_package("tool", post_install='cp "$PREFIX/bin/tool" "$PREFIX/bin/tool-copy"')
     env.pmg("install", "tool")
