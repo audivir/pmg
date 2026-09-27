@@ -9,9 +9,7 @@ brew = "zig"
 
 [release]
 type = "command"
-cmd = """
-curl -fsSL https://ziglang.org/download/index.json \
-  | grep -o 'https://ziglang.org/download/[0-9.]*/' | awk -F/ 'NR == 1 {print $5}'"""
+cmd = "curl -fsSL https://ziglang.org/download/index.json | grep -o 'https://ziglang.org/download/[0-9.]*/' | awk -F/ 'NR == 1 {print $5}'"
 
 [download]
 type = "url"

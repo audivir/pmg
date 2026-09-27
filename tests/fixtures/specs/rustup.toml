@@ -19,6 +19,4 @@ curl -fsSL https://static.rust-lang.org/rustup/release-stable.toml \
 [download]
 type = "command"
 # the default profile without its offline docs, which take several hundred MB
-cmd = """
-curl -fsSL https://sh.rustup.rs | sh -s -- --default-toolchain stable \
-  --profile minimal --component rustfmt,clippy --no-update-default-toolchain --no-modify-path -y"""
+cmd = "curl -fsSL https://sh.rustup.rs | sh -s -- --default-toolchain stable --profile minimal --component rustfmt,clippy --no-update-default-toolchain --no-modify-path -y"

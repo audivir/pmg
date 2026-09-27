@@ -11,7 +11,7 @@ apt = "golang"
 
 [release]
 type = "command"
-cmd = """curl -fsSL 'https://go.dev/VERSION?m=text' | head -n 1"""
+cmd = "curl -fsSL 'https://go.dev/VERSION?m=text' | head -n 1"
 
 [download]
 type = "url"
