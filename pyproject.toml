@@ -120,6 +120,10 @@ convention = "google"
 required-imports = ["from __future__ import annotations"]
 split-on-trailing-comma = false
 
+[tool.ruff.lint.flake8-type-checking]
+# msgspec resolves the annotations of structs at runtime
+runtime-evaluated-base-classes = ["msgspec.Struct", "pmg.models.BaseStruct"]
+
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
