@@ -135,11 +135,11 @@ class Env:
         env = {
             key: value
             for key, value in os.environ.items()
-            if not key.startswith(("XDG_", "PMG_SPECS"))
+            if not key.startswith(("XDG_", "PMG_SPECS_DIR"))
         }
         env["HOME"] = str(self.home)
         if not default_specs:
-            env["PMG_SPECS"] = str(self.specs)
+            env["PMG_SPECS_DIR"] = str(self.specs)
         result = subprocess.run(  # noqa: S603
             [sys.executable, "-m", "pmg", *args],
             env=env,
@@ -326,7 +326,7 @@ def test_dependency_cycle(env: Env) -> None:
 @pytest.mark.skipif(os.getenv("PMG_OFFLINE") == "1", reason="PMG_OFFLINE=1")
 def test_install_bat_from_github(tmp_path: Path) -> None:
     env = {key: value for key, value in os.environ.items() if not key.startswith("XDG_")}
-    env |= {"HOME": str(tmp_path), "PMG_SPECS": str(FIXTURE_SPECS)}
+    env |= {"HOME": str(tmp_path), "PMG_SPECS_DIR": str(FIXTURE_SPECS)}
     subprocess.check_call([sys.executable, "-m", "pmg", "install", "bat"], env=env)
     bat = tmp_path / ".local" / "bin" / "bat"
     version = subprocess.check_output([bat, "--version"], text=True)  # noqa: S603

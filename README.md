@@ -46,7 +46,7 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
   the archive is stripped.
 - `post_install` runs a shell command in the staging directory, which is also in `PREFIX`.
 
-Specs are read from `PMG_SPECS`, by default `$XDG_CONFIG_HOME/pmg/specs`.
+Specs are read from `PMG_SPECS_DIR`, by default `$XDG_CONFIG_HOME/pmg/specs`.
 
 ```bash
 python -m pmg install bat

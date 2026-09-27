@@ -1,6 +1,6 @@
 """Resolving, installing, and uninstalling packages from their specs.
 
-Package specs are TOML files named after the package in `PMG_SPECS`, by default
+Package specs are TOML files named after the package in `PMG_SPECS_DIR`, by default
 `$XDG_CONFIG_HOME/pmg/specs`. Templates in a spec are Jinja templates with {{ tag }} (the release
 tag, e.g. "v0.26.1"), {{ version }} (the tag without a leading "v"), and {{ asset }} (the asset
 file name).
@@ -215,7 +215,7 @@ class Files(SyncConsumer):
 
 def spec_dir() -> Path:
     """Returns the directory of the package specs."""
-    if specs := os.getenv("PMG_SPECS"):
+    if specs := os.getenv("PMG_SPECS_DIR"):
         return Path(specs)
     return Path(os.getenv("XDG_CONFIG_HOME") or Path.home() / ".config") / "pmg" / "specs"
 
