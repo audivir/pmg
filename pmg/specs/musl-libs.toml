@@ -17,3 +17,5 @@ package = "libstdc++"
 [download]
 type = "apk"
 packages = ["libstdc++", "libgcc"]
+
+[assets]

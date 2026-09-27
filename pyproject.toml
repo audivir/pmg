@@ -17,7 +17,14 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Typing :: Typed",
 ]
-dependencies = ["doctyper", "jinja2", "msgspec", "mxhttp", "packaging"]
+dependencies = [
+  "doctyper",
+  "jinja2",
+  "msgspec",
+  "mxhttp",
+  "packaging",
+  "zstandard",
+]
 
 [project.optional-dependencies]
 

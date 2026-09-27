@@ -42,16 +42,27 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
 ```
 
 - Templates can use `{{ tag }}`, `{{ version }}` (the tag without a leading `v`), `{{ asset }}`,
-  `{{ data }}` (`$XDG_DATA_HOME`), `{{ bin }}`, `{{ dir }}`, and `{{ dirs.<key> }}`.
-- glibc hosts older than `min_glibc` get the musl asset.
+  `{{ arch }}` (as `uname -m` prints it), `{{ data }}` (`$XDG_DATA_HOME`), `{{ bin }}`, `{{ dir }}`,
+  and `{{ dirs.<key> }}`.
+- `release` and `download` are of the type `github`, `url`, `command` (release only), `static`
+  (release only), `apk` (packages of the main Alpine repo, of the host release or else
+  latest-stable), or `conda` (the newest `.conda` file of the asset package in a channel).
+- glibc hosts older than `min_glibc` get the musl asset. `platforms` limits a package to some
+  platforms, other hosts skip it as a dependency.
 - `bin` maps names in `~/.local/bin` to paths in the archive. A single top-level directory in
   the archive is stripped. `links` adds symlinks instead of copies.
 - `man` lists man pages in the archive, the file extension is the section.
 - `completions` maps a command to its completion script per shell, either a path in the archive
   or `{ cmd = "..." }`, a command printing it.
 - Everything else belongs in the package directory `{{ dir }}`, by default `$XDG_DATA_HOME/<name>`
-  (set `dir` to change it). `content = true` makes the unpacked archive the package directory,
-  `dirs` adds more directories. The package owns these directories as a whole.
+  (set `dir` to change it). `content = true` makes the unpacked archive the package directory, or
+  `content = "<glob>"` its only matching subdirectory. `keep` and `remove` are globs of the files
+  kept in and removed from it. `dirs` adds more directories. The package owns these directories as
+  a whole.
+- `check` detects a copy that pmg did not install: `files` must exist, the dynamic loader must find
+  `libs`, and `cmd` must run. Without them, the first command of the package runs with `args`
+  (`--version`). The version is the first match of `regex` in the output. Such an external version
+  satisfies dependencies and is only recorded, pmg leaves its files alone.
 - `post_install` runs a shell command in the staging directory `PREFIX`.
 
 Packages share this layout:
@@ -96,6 +107,11 @@ python -m pmg autoremove
 - `list` shows each installed version, whether it was installed directly or as a dependency, and
   whether it is active.
 - Set `PMG_GH_TOKEN` (or `GH_TOKEN`) to avoid the rate limit of the GitHub API.
+- `PMG_ALPINE_MIRROR`, `PMG_CONDA_API`, and `PMG_CONDA_URL` replace the Alpine mirror, the
+  anaconda.org API, and the conda download server.
+
+pmg ships specs for `glibc` (for running glibc programs on musl hosts), `musl` (the reverse),
+`musl-libs` (libstdc++ and libgcc_s for musl hosts), and `patchelf`.
 
 ## License
 

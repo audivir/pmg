@@ -5,12 +5,16 @@ Set PMG_OFFLINE=1 to skip the test that installs bat from GitHub.
 
 from __future__ import annotations
 
+import ctypes.util
 import dataclasses
 import functools
+import gzip
+import hashlib
 import http.server
 import io
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -21,14 +25,54 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias, override
 
 import pytest
+import zstandard
+
+from pmg.core import decode, detect_platform
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-ArchiveFormat: TypeAlias = Literal["tar.gz", "zip", "bare"]
+ArchiveFormat: TypeAlias = Literal["tar.gz", "tar.zst", "zip", "bare"]
 
 FIXTURE_SPECS = Path(__file__).parent / "fixtures" / "specs"
+SHIPPED_SPECS = Path(__file__).parents[1] / "pmg" / "specs"
 PLATFORMS = ("glibc_x64", "glibc_arm64", "musl_x64", "musl_arm64", "macos_arm64")
+LIBC = ctypes.util.find_library("c") or "libc.so.6"
+
+
+def tar_bytes(entries: dict[str, tuple[bytes, int]], end: bool = True) -> bytes:
+    """Builds an uncompressed tar, without the end-of-archive blocks if `end` is unset."""
+    blocks = b""
+    for path, (data, mode) in entries.items():
+        tar_info = tarfile.TarInfo(path)
+        tar_info.size, tar_info.mode = len(data), mode
+        blocks += tar_info.tobuf(tarfile.GNU_FORMAT) + data + b"\0" * (-len(data) % 512)
+    return blocks + b"\0" * 1024 if end else blocks
+
+
+def apk_bytes(files: dict[str, tuple[bytes, int]]) -> bytes:
+    # like Alpine: the metadata tar is left open, so the gzipped tars read as one
+    control = tar_bytes({".PKGINFO": (b"pkgname = test\n", 0o644)}, end=False)
+    return gzip.compress(control) + gzip.compress(tar_bytes(files))
+
+
+def zip_bytes(members: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zip_file:
+        for name, data in members.items():
+            zip_file.writestr(name, data)
+    return buffer.getvalue()
+
+
+def alpine_repo(mirror: Path) -> Path:
+    release_file = Path("/etc/alpine-release")
+    release = (
+        f"v{'.'.join(release_file.read_text().split('.')[:2])}"
+        if release_file.exists()
+        else "latest-stable"
+    )
+    machine = {"arm64": "aarch64"}.get(platform.machine(), platform.machine())
+    return mirror / release / "main" / machine
 
 
 def clean_environ(home: Path) -> dict[str, str]:
@@ -37,7 +81,8 @@ def clean_environ(home: Path) -> dict[str, str]:
         for key, value in os.environ.items()
         if not key.startswith(("XDG_", "PMG_HOME", "PMG_SPECS_DIR"))
     }
-    env["HOME"] = str(home)
+    # only the basics, so no command of the host counts as an external version
+    env |= {"HOME": str(home), "PATH": f"/usr/bin{os.pathsep}/bin"}
     return env
 
 
@@ -82,6 +127,19 @@ class Env:
         return self.home / ".local" / "share"
 
     @property
+    def system(self) -> Path:
+        return self.root / "system"
+
+    def add_system_command(self, name: str, output: str) -> None:
+        self.system.mkdir(exist_ok=True)
+        (self.system / name).write_text(f"#!/bin/sh\necho {output}\n")
+        (self.system / name).chmod(0o755)
+
+    def write_spec(self, name: str, text: str) -> None:
+        self.specs.mkdir(exist_ok=True)
+        (self.specs / f"{name}.toml").write_text(text)
+
+    @property
     def pmg_home(self) -> Path:
         return self.root / "pmg-home"
 
@@ -101,19 +159,18 @@ class Env:
         files: dict[str, str] | None = None,
         spec: tuple[str, ...] = (),
         bin_entry: bool = True,
+        check: str = "{}",
     ) -> None:
         script_bytes = (script or f"#!/bin/sh\necho {name} {version}\n").encode()
-        if archive_format == "tar.gz":
-            asset = f"{name}-{{{{ version }}}}.tar.gz"
+        if archive_format in {"tar.gz", "tar.zst"}:
+            asset = f"{name}-{{{{ version }}}}.{archive_format}"
             bin_path = "bin/" + name
             entries = {bin_path: (script_bytes, 0o755)} | {
                 path: (text.encode(), 0o644) for path, text in (files or {}).items()
             }
-            with tarfile.open(self.assets / f"{name}-{version}.tar.gz", "w:gz") as tar_file:
-                for path, (data, mode) in entries.items():
-                    tar_info = tarfile.TarInfo(f"{name}-{version}/{path}")
-                    tar_info.size, tar_info.mode = len(data), mode
-                    tar_file.addfile(tar_info, io.BytesIO(data))
+            tar = tar_bytes({f"{name}-{version}/{path}": entry for path, entry in entries.items()})
+            compress = gzip.compress if archive_format == "tar.gz" else zstandard.compress
+            (self.assets / f"{name}-{version}.{archive_format}").write_bytes(compress(tar))
         elif archive_format == "zip":
             asset = f"{name}-{{{{ version }}}}.zip"
             bin_path = name
@@ -137,7 +194,7 @@ class Env:
         if min_glibc:
             lines.append(f'min_glibc = "{min_glibc}"')
         lines += [
-            "check = {}",
+            f"check = {check}",
             "[external]",
             "[release]",
             release or f'type = "static"\ntag = "v{version}"',
@@ -157,7 +214,13 @@ class Env:
         self, *args: str, ok: bool = True, specs_dir: bool = True
     ) -> subprocess.CompletedProcess[str]:
         env = clean_environ(self.home)
-        env["PMG_HOME"] = str(self.pmg_home)
+        env |= {
+            "PMG_HOME": str(self.pmg_home),
+            "PATH": f"{self.system}{os.pathsep}{env['PATH']}",
+            "PMG_ALPINE_MIRROR": f"{self.base_url}/alpine",
+            "PMG_CONDA_API": f"{self.base_url}/conda-api",
+            "PMG_CONDA_URL": f"{self.base_url}/conda",
+        }
         if specs_dir:
             env["PMG_SPECS_DIR"] = str(self.specs)
         result = subprocess.run(  # noqa: S603
@@ -204,7 +267,7 @@ def test_install_resolves_dependencies(env: Env) -> None:
     assert env.installed() == expected
 
 
-@pytest.mark.parametrize("archive_format", ["tar.gz", "zip", "bare"])
+@pytest.mark.parametrize("archive_format", ["tar.gz", "tar.zst", "zip", "bare"])
 def test_install_unpacks_archive_formats(env: Env, archive_format: ArchiveFormat) -> None:
     # tar.gz has a top-level dir to strip; zip must keep the executable bit it stores
     env.add_package("tool", archive_format=archive_format)
@@ -271,15 +334,16 @@ def test_content_becomes_package_dir_with_links(env: Env) -> None:
 def test_extra_dirs_are_owned(env: Env) -> None:
     env.add_package(
         "tool",
-        spec=('dirs = { cache = "{{ data }}/tool-cache" }',),
+        spec=('dirs = { cache = "{{ data }}/tool-cache-{{ arch }}" }',),
         post_install='echo state > "$PREFIX/dirs/cache/state"',
     )
     env.pmg("install", "tool")
-    assert (env.data / "tool-cache" / "state").read_text() == "state\n"
+    cache = env.data / f"tool-cache-{platform.machine()}"
+    assert (cache / "state").read_text() == "state\n"
     # the package dir stays absent, as nothing was put into it
     assert not (env.data / "tool@v1.0").exists()
     env.pmg("uninstall", "tool")
-    assert not (env.data / "tool-cache").exists()
+    assert not cache.exists()
 
 
 def test_install_refuses_foreign_package_dir(env: Env) -> None:
@@ -483,6 +547,199 @@ def test_dependency_cycle(env: Env) -> None:
     env.add_package("b", deps=("a",))
     assert "dependency cycle" in env.pmg("install", "a", ok=False).stderr
     assert env.installed() == {}
+
+
+def test_content_subdir_with_keep_and_remove(env: Env) -> None:
+    env.add_package(
+        "tool",
+        files={
+            "sub/root/lib/a.so": "a",
+            "sub/root/lib/b.a": "b",
+            "sub/root/lib/deep/c.so": "c",
+            "sub/root/doc/readme": "doc",
+        },
+        spec=('content = "sub/*"', 'keep = ["lib/*"]', 'remove = ["lib/*.a"]'),
+        bin_entry=False,
+    )
+    env.pmg("install", "tool")
+    root = env.data / "tool@v1.0"
+    # the kept dir lib/deep keeps its content, the emptied doc dir goes
+    assert sorted(str(path.relative_to(root)) for path in root.rglob("*")) == [
+        "lib",
+        "lib/a.so",
+        "lib/deep",
+        "lib/deep/c.so",
+    ]
+
+
+def test_platforms(env: Env) -> None:
+    others = [platform for platform in PLATFORMS if platform != detect_platform(None)]
+    env.add_package("lib", spec=(f"platforms = {json.dumps(others)}",))
+    env.add_package("app", deps=("lib",))
+    # as a dependency, a package for other platforms is skipped
+    env.pmg("install", "app")
+    assert env.installed() == {"app@v1.0": "explicit active"}
+    assert "lib is only for" in env.pmg("install", "lib", ok=False).stderr
+
+
+def test_external_command(env: Env) -> None:
+    env.add_system_command("tool", "tool 3.1")
+    env.add_package("tool")
+    env.add_package("app", deps=("tool",))
+    env.add_package("old", deps=("tool<3",))
+    env.pmg("install", "app")
+    assert env.installed() == {
+        "app@v1.0": "explicit active",
+        "tool@external": "dependency external 3.1",
+    }
+    assert not (env.bin / "tool").exists()
+    # the external 3.1 is too new for old, so pmg installs its own tool
+    env.pmg("install", "old")
+    assert env.run_bin("tool") == "tool 1.0"
+    env.pmg("uninstall", "app", "old")
+    env.pmg("autoremove")
+    assert env.installed() == {}
+    assert (env.system / "tool").exists()
+
+
+def test_external_package_pulls_in_no_dependencies(env: Env) -> None:
+    env.add_system_command("app", "app 2.0")
+    env.add_package("lib")
+    env.add_package("app", deps=("lib",))
+    env.pmg("install", "app")
+    assert env.installed() == {"app@external": "explicit external 2.0"}
+
+
+@pytest.mark.parametrize(
+    ("check", "external"),
+    [
+        ('{ files = ["SYSTEM/marker"] }', True),
+        (f'{{ libs = ["{LIBC}"] }}', True),
+        ('{ libs = ["libmissing.so.1"] }', False),
+    ],
+)
+def test_external_files_and_libs(env: Env, check: str, external: bool) -> None:
+    env.add_system_command("marker", "")
+    env.add_package("tool", check=check.replace("SYSTEM", str(env.system)))
+    env.pmg("install", "tool")
+    expected = {"tool@external": "explicit external unknown"}
+    assert env.installed() == (expected if external else {"tool@v1.0": "explicit active"})
+
+
+def test_alpine_packages(env: Env) -> None:
+    repo = alpine_repo(env.assets / "alpine")
+    repo.mkdir(parents=True)
+    index = b"P:tool\nV:1.0-r0\n\nP:toollib\nV:2.0-r1\n\n"
+    apkindex = tar_bytes({"APKINDEX": (index, 0o644)})
+    (repo / "APKINDEX.tar.gz").write_bytes(gzip.compress(apkindex))
+    tool = apk_bytes({"usr/bin/tool": (b"#!/bin/sh\necho alpine tool\n", 0o755)})
+    (repo / "tool-1.0-r0.apk").write_bytes(tool)
+    toollib = apk_bytes({"usr/lib/libtool.so.1": (b"lib", 0o644), "usr/share/doc": (b"doc", 0o644)})
+    (repo / "toollib-2.0-r1.apk").write_bytes(toollib)
+    env.write_spec(
+        "tool",
+        """content = true
+keep = ["usr/bin/*", "usr/lib/*"]
+links = { tool = "{{ dir }}/usr/bin/tool" }
+check = {}
+[external]
+[release]
+type = "apk"
+package = "tool"
+[download]
+type = "apk"
+packages = ["tool", "toollib"]
+[assets]
+""",
+    )
+    env.pmg("install", "tool")
+    assert env.installed() == {"tool@1.0-r0": "explicit active"}
+    assert env.run_bin("tool") == "alpine tool"
+    root = env.data / "tool@1.0-r0"
+    assert sorted(str(path.relative_to(root)) for path in root.rglob("*")) == [
+        "usr",
+        "usr/bin",
+        "usr/bin/tool",
+        "usr/lib",
+        "usr/lib/libtool.so.1",
+    ]
+
+
+def test_conda_package(env: Env) -> None:
+    sysroot = "x86_64-conda-linux-gnu/sysroot"
+    payload = tar_bytes(
+        {
+            f"{sysroot}/lib64/libc.so.6": (b"libc", 0o644),
+            f"{sysroot}/lib64/libc.a": (b"static", 0o644),
+            f"{sysroot}/usr/include/stdio.h": (b"header", 0o644),
+        }
+    )
+    conda = zip_bytes(
+        {"pkg-sysroot.tar.zst": zstandard.compress(payload), "info-sysroot.tar.zst": b""}
+    )
+    (env.assets / "conda" / "cf" / "linux-64").mkdir(parents=True)
+    (env.assets / "conda" / "cf" / "linux-64" / "sysroot-2.28-0.conda").write_bytes(conda)
+    files = [
+        # placeholder builds, other formats, and older versions are ignored
+        {"version": "9999", "basename": "linux-64/sysroot-9999-0.conda", "upload_time": "3"},
+        {"version": "2.28", "basename": "linux-64/sysroot-2.28-0.tar.bz2", "upload_time": "2"},
+        {"version": "2.17", "basename": "linux-64/sysroot-2.17-0.conda", "upload_time": "2"},
+        {
+            "version": "2.28",
+            "basename": "linux-64/sysroot-2.28-0.conda",
+            "upload_time": "1",
+            "sha256": hashlib.sha256(conda).hexdigest(),
+        },
+    ]
+    api = env.assets / "conda-api" / "package" / "cf" / "sysroot"
+    api.mkdir(parents=True)
+    (api / "files").write_text(json.dumps(files))
+    assets = "\n".join(f'{platform} = "sysroot"' for platform in PLATFORMS)
+    env.write_spec(
+        "sysroot",
+        f"""content = "*-conda-linux-gnu/sysroot"
+remove = ["lib64/*.a", "usr/include"]
+post_install = 'cd "$PREFIX/dir" && ln -s lib64/libc.so.6 loader'
+check = {{}}
+[external]
+[release]
+type = "conda"
+channel = "cf"
+[download]
+type = "conda"
+channel = "cf"
+[assets]
+{assets}
+""",
+    )
+    env.pmg("install", "sysroot")
+    assert env.installed() == {"sysroot@2.28": "explicit active"}
+    root = env.data / "sysroot@2.28"
+    assert sorted(str(path.relative_to(root)) for path in root.rglob("*")) == [
+        "lib64",
+        "lib64/libc.so.6",
+        "loader",
+        "usr",
+    ]
+    assert (root / "loader").read_text() == "libc"
+
+
+def for_host(name: str) -> pytest.MarkDecorator:
+    platforms = decode((SHIPPED_SPECS / f"{name}.toml").read_text()).platforms
+    host = detect_platform(None)
+    return pytest.mark.skipif(host not in platforms, reason=f"{name} is not for {host}")
+
+
+@pytest.mark.skipif(os.getenv("PMG_OFFLINE") == "1", reason="PMG_OFFLINE=1")
+@pytest.mark.parametrize(
+    "name", [pytest.param(name, marks=for_host(name)) for name in ("patchelf", "musl")]
+)
+def test_install_shipped_spec(tmp_path: Path, name: str) -> None:
+    subprocess.check_call(  # noqa: S603
+        [sys.executable, "-m", "pmg", "install", name], env=clean_environ(tmp_path)
+    )
+    expected = {"patchelf": "bin/patchelf", "musl": "share/musl@*/lib/ld-musl-*.so.1"}[name]
+    assert list((tmp_path / ".local").glob(expected))
 
 
 @pytest.mark.skipif(os.getenv("PMG_OFFLINE") == "1", reason="PMG_OFFLINE=1")

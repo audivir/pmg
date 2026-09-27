@@ -3,8 +3,9 @@
 Package specs are TOML files named after the package, searched in `$PMG_SPECS_DIR`, then in
 `$PMG_HOME/specs`, then in the specs shipped with pmg. Templates in a spec are Jinja templates with
 {{ tag }} (the release tag, e.g. "v0.26.1"), {{ version }} (the tag without a leading "v"),
-{{ data }} (`$XDG_DATA_HOME`), {{ bin }} (the bin dir), {{ dir }} (the package dir),
-{{ dirs.<key> }} (the extra dirs of the package), and, for files, {{ asset }} (the asset name).
+{{ arch }} (the machine as `uname -m` prints it), {{ data }} (`$XDG_DATA_HOME`), {{ bin }} (the bin
+dir), {{ dir }} (the package dir), {{ dirs.<key> }} (the extra dirs of the package), and, for
+files, {{ asset }} (the asset name).
 
 Packages install their commands, man pages, and completions into the shared layout below `~/.local`
 and everything else into their own dirs below `$XDG_DATA_HOME`, which they own as a whole.
@@ -18,6 +19,7 @@ import graphlib
 import logging
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -26,18 +28,24 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import IO, TYPE_CHECKING, Annotated
 from urllib.parse import urlsplit
 
 import jinja2
 import msgspec
+import zstandard
 from mxhttp import BearerAuth, Downloader, RawPath, SyncConsumer, base_url, get
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 
 from pmg.models import (
+    ApkDownload,
+    ApkRelease,
     CommandDownload,
     CommandRelease,
+    CondaDownload,
+    CondaFile,
+    CondaRelease,
     Context,
     GitHubDownload,
     GitHubRelease,
@@ -45,6 +53,7 @@ from pmg.models import (
     Package,
     Platform,
     Record,
+    UrlDownload,
     requirements,
     tag_version,
 )
@@ -65,7 +74,8 @@ HOST_PLATFORMS: dict[tuple[str, str], Platform] = {
 """Platform for each libc and machine, as reported by `platform.machine`."""
 COMPLETION_NAMES = {"zsh": "_{}", "bash": "{}", "fish": "{}.fish"}
 """File name of the completion script of a command for each shell."""
-TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2")
+TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".apk")
+ZSTD_SUFFIXES = (".tar.zst", ".tzst")
 
 logger = logging.getLogger("pmg")
 
@@ -85,6 +95,14 @@ class GitHubApi(SyncConsumer):
     @get("/repos/{owner}/{name}/releases/tags/{tag}")
     def release(self, owner: str, name: str, tag: str) -> GitHubReleaseInfo:  # type: ignore[empty-body]
         """Fetches the release of a repo with the given tag."""
+
+
+class CondaApi(SyncConsumer):
+    """Wraps the package files endpoint of the anaconda.org API."""
+
+    @get("/package/{channel}/{package}/files")
+    def files(self, channel: str, package: str) -> list[CondaFile]:  # type: ignore[empty-body]
+        """Fetches all files of a package in a channel."""
 
 
 class Files(SyncConsumer):
@@ -149,9 +167,11 @@ def version_store(name: str, tag: str) -> Path:
 def make_context(name: str, pkg: Package, tag: str) -> Context:
     """Resolves the template variables of a package."""
     data, bin_dir = data_home(), layout()["bin"]
-    base = Context(tag=tag, data=data, bin=bin_dir, dir=data / name, dirs={})
+    arch = platform.machine()
+    base = Context(tag=tag, arch=arch, data=data, bin=bin_dir, dir=data / name, dirs={})
     return Context(
         tag=tag,
+        arch=arch,
         data=data,
         bin=bin_dir,
         dir=versioned(Path(render(pkg.dir, base)) if pkg.dir else base.dir, tag),
@@ -279,13 +299,93 @@ def run_shell(name: str, step: str, cmd: str, cwd: Path | None = None, **env: st
             executable=spec_shell(),
             cwd=cwd,
             text=True,
-            env={**os.environ, **env},
+            # commands installed as dependencies are in the bin dir, which may not be in PATH.
+            env={
+                **os.environ,
+                "PATH": f"{layout()['bin']}{os.pathsep}{os.getenv('PATH', '')}",
+                **env,
+            },
         )
     except subprocess.CalledProcessError as e:
         raise PmgError(f"{step} of {name} failed with exit code {e.returncode}") from e
 
 
-def fetch_release(name: str, pkg: Package) -> str:
+def alpine_repo() -> str:
+    """Returns the URL of the main Alpine repo of the host release, or else of latest-stable."""
+    mirror = os.getenv("PMG_ALPINE_MIRROR") or "https://dl-cdn.alpinelinux.org/alpine"
+    release_file = Path("/etc/alpine-release")
+    release = (
+        f"v{'.'.join(release_file.read_text().split('.')[:2])}"
+        if release_file.exists()
+        else "latest-stable"
+    )
+    machine = {"arm64": "aarch64"}.get(platform.machine(), platform.machine())
+    return f"{mirror}/{release}/main/{machine}"
+
+
+@functools.cache
+def apk_index(repo: str) -> dict[str, str]:
+    """Maps the packages of an Alpine repo to their versions."""
+    with tempfile.TemporaryDirectory() as tmp:
+        index = download_file(f"{repo}/APKINDEX.tar.gz", Path(tmp) / "APKINDEX.tar.gz")
+        with tarfile.open(index) as tar_file:
+            member = tar_file.extractfile("APKINDEX")
+            if member is None:  # pragma: no cover
+                raise PmgError(f"{repo} has no APKINDEX")
+            text = member.read().decode()
+    versions: dict[str, str] = {}
+    # blocks of "X:value" lines, P is the package and V its version
+    for block in text.split("\n\n"):
+        fields = {line[0]: line[2:] for line in block.splitlines() if line[1:2] == ":"}
+        if "P" in fields and "V" in fields:
+            versions[fields["P"]] = fields["V"]
+    return versions
+
+
+def apk_version(repo: str, package: str) -> str:
+    """Returns the version of a package in an Alpine repo.
+
+    Raises:
+        PmgError: If the repo has no such package.
+    """
+    version = apk_index(repo).get(package)
+    if version is None:  # pragma: no cover
+        raise PmgError(f"{repo} has no package {package}")
+    return version
+
+
+def conda_file(channel: str, package: str, version: str | None = None) -> CondaFile:
+    """Returns the newest .conda file of a package, of `version` if given.
+
+    Raises:
+        PmgError: If the package has no such file.
+    """
+    api = CondaApi(base_url=os.getenv("PMG_CONDA_API") or "https://api.anaconda.org")
+    files = [
+        file
+        for file in api.files(channel=channel, package=package)
+        # conda-forge publishes placeholder builds as 9999
+        if file.basename.endswith(".conda") and file.version != "9999"
+        if tag_version(file.version) is not None and version in {None, file.version}
+    ]
+    if not files:  # pragma: no cover
+        raise PmgError(f"{channel} has no .conda file of {package} {version or ''}")
+    return max(files, key=lambda file: (tag_version(file.version), file.upload_time))
+
+
+def asset_name(pkg: Package, host: Platform) -> str:
+    """Returns the asset template of the host platform.
+
+    Raises:
+        PmgError: If there is no asset for the host platform.
+    """
+    template = pkg.assets.get(host)
+    if template is None:  # pragma: no cover
+        raise PmgError(f"no asset for {host}")
+    return template
+
+
+def fetch_release(name: str, pkg: Package, host: Platform) -> str:
     """Returns the latest tag.
 
     Raises:
@@ -299,6 +399,10 @@ def fetch_release(name: str, pkg: Package) -> str:
         if not tag:  # pragma: no cover
             raise PmgError(f"release command of {name} printed no tag")
         return tag
+    if isinstance(rl, ApkRelease):
+        return apk_version(alpine_repo(), rl.package)
+    if isinstance(rl, CondaRelease):
+        return conda_file(rl.channel, asset_name(pkg, host)).version
     return rl.tag
 
 
@@ -311,21 +415,34 @@ def download_file(url: str, dest: Path, checksum: str | None = None) -> Path:
     return files.download(path=path)(dest, checksum=checksum, overwrite=True)
 
 
-def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath) -> Path:
-    """Renders the url with the host asset and downloads the data to `dl_dir`.
+def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath) -> list[Path]:
+    """Downloads the archives of the host platform to `dl_dir`.
 
     Raises:
         PmgError: If there is no asset for the host platform.
     """
     dl_dir = Path(dl_dir)
-    dl = pkg.download
+    dl, tag = pkg.download, context.tag
     if isinstance(dl, CommandDownload):  # pragma: no cover
         raise NotImplementedError("CommandDownload not yet supported")
-    asset_template = pkg.assets.get(host)
-    if asset_template is None:  # pragma: no cover
-        raise PmgError(f"no asset for {host}")
-    asset = render(asset_template, context)
-    tag = context.tag
+    if isinstance(dl, ApkDownload):
+        repo = alpine_repo()
+        release = pkg.release.package if isinstance(pkg.release, ApkRelease) else None
+        versions = {
+            package: tag if package == release else apk_version(repo, package)
+            for package in dl.packages
+        }
+        return [
+            download_file(f"{repo}/{package}-{version}.apk", dl_dir / f"{package}-{version}.apk")
+            for package, version in versions.items()
+        ]
+    asset = render(asset_name(pkg, host), context)
+    if isinstance(dl, CondaDownload):
+        file = conda_file(dl.channel, asset, tag)
+        mirror = os.getenv("PMG_CONDA_URL") or "https://conda.anaconda.org"
+        checksum = f"sha256:{file.sha256}" if file.sha256 else None
+        url = f"{mirror}/{dl.channel}/{file.basename}"
+        return [download_file(url, dl_dir / Path(file.basename).name, checksum)]
     if isinstance(dl, GitHubDownload):
         if not dl.repo:  # pragma: no cover
             raise RuntimeError("GitHubDownload's repo not set in __post_init__")
@@ -333,18 +450,35 @@ def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath
         found = next((a for a in info.assets if a.name == asset), None)
         if found is None:  # pragma: no cover
             raise PmgError(f"{dl.repo} {tag} has no asset {asset}")
-        return download_file(found.browser_download_url, dl_dir / asset, found.digest)
+        return [download_file(found.browser_download_url, dl_dir / asset, found.digest)]
     url = render(dl.url, context, asset=asset)
-    return download_file(url, dl_dir / Path(urlsplit(url).path).name)
+    return [download_file(url, dl_dir / Path(urlsplit(url).path).name)]
 
 
-def unpack(archive: Path, dest: Path) -> Path:
-    """Unpacks the archive into `dest` and returns the dir holding its content.
+def extract_tar_zst(fileobj: IO[bytes], dest: Path) -> None:
+    """Extracts a zstd-compressed tar stream into `dest`."""
+    with (
+        zstandard.ZstdDecompressor().stream_reader(fileobj) as reader,
+        tarfile.open(fileobj=reader, mode="r|") as tar_file,
+    ):
+        tar_file.extractall(dest, filter="data")
 
-    Archives holding a single top-level dir return that dir. Other files count as a bare binary.
+
+def unpack(archive: Path, dest: Path) -> None:
+    """Unpacks the archive into `dest`; other files count as a bare binary.
+
+    Alpine packages lose their metadata files, conda packages keep only their payload.
     """
-    dest.mkdir(parents=True)
-    if archive.name.endswith(".zip"):
+    dest.mkdir(parents=True, exist_ok=True)
+    if archive.name.endswith(".conda"):
+        with zipfile.ZipFile(archive) as zip_file:
+            payload = next(name for name in zip_file.namelist() if name.startswith("pkg-"))
+            with zip_file.open(payload) as fileobj:
+                extract_tar_zst(fileobj, dest)
+    elif archive.name.endswith(ZSTD_SUFFIXES):
+        with archive.open("rb") as fileobj:
+            extract_tar_zst(fileobj, dest)
+    elif archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as zip_file:
             for info in zip_file.infolist():
                 path = Path(zip_file.extract(info, dest))
@@ -353,15 +487,39 @@ def unpack(archive: Path, dest: Path) -> Path:
                 if mode and not info.is_dir():
                     path.chmod(mode)
     elif archive.name.endswith(TAR_SUFFIXES):
+        # an .apk is gzipped tars one after another: signature, .PKGINFO, and files
         with tarfile.open(archive) as tar_file:
             tar_file.extractall(dest, filter="data")
+        if archive.name.endswith(".apk"):
+            for path in dest.glob(".*"):
+                remove_path(path)
     else:
         shutil.copy2(archive, dest / archive.name)
-        return dest
-    entries = list(dest.iterdir())
+
+
+def strip_single_dir(root: Path) -> Path:
+    """Returns the only entry of `root` if it is a dir, else `root`."""
+    entries = list(root.iterdir())
     if len(entries) == 1 and entries[0].is_dir():
         return entries[0]
-    return dest
+    return root
+
+
+def prune(root: Path, keep: list[str], remove: list[str]) -> None:
+    """Removes the files of the package dir that `keep` misses, and those that `remove` matches."""
+    if keep:
+        kept = {path for pattern in keep for path in root.glob(pattern)}
+        # children come before their parents, so emptied dirs can go too
+        for path in sorted(root.rglob("*"), reverse=True):
+            if path in kept or not kept.isdisjoint(path.parents):
+                continue
+            if not path.is_dir() or path.is_symlink():
+                path.unlink()
+            elif not any(path.iterdir()):
+                path.rmdir()
+    for pattern in remove:
+        for path in list(root.glob(pattern)):
+            remove_path(path)
 
 
 @contextlib.contextmanager
@@ -417,17 +575,32 @@ def stage_files(
     return generated
 
 
-def run_install(name: str, pkg: Package, context: Context, archive: Path, target: Path) -> None:
-    """Unpacks the archive and places the files and dirs of the package in the staging dir.
+def run_install(
+    name: str, pkg: Package, context: Context, archives: list[Path], target: Path
+) -> None:
+    """Unpacks the archives and places the files and dirs of the package in the staging dir.
+
+    Release archives lose a single top-level dir; Alpine and conda packages keep their layout.
 
     Raises:
-        PmgError: If a file is missing from the archive or a spec command fails.
+        PmgError: If a file is missing from the archives or a spec command fails.
     """
-    content = unpack(archive, target.parent / "unpacked")
-    generated = stage_files(pkg, context, content, archive.name, target)
+    content = target.parent / "unpacked"
+    for archive in archives:
+        unpack(archive, content)
+    if isinstance(pkg.download, GitHubDownload | UrlDownload):
+        content = strip_single_dir(content)
+    generated = stage_files(pkg, context, content, archives[0].name, target)
     if pkg.content:
+        root = content
+        if isinstance(pkg.content, str):
+            matches = sorted(content.glob(pkg.content))
+            if len(matches) != 1:  # pragma: no cover
+                raise PmgError(f"content {pkg.content} of {name} matches {len(matches)} dirs")
+            root = matches[0]
         (target / "dir").rmdir()
-        shutil.move(content, target / "dir")
+        shutil.move(root, target / "dir")
+        prune(target / "dir", pkg.keep, pkg.remove)
     if pkg.post_install:
         run_shell(
             name, "post_install", render(pkg.post_install, context), target, PREFIX=str(target)
@@ -562,12 +735,112 @@ def rewind_state(moved: list[Path]) -> None:
         remove_path(path)
 
 
-def satisfies(tag: str, specifier: SpecifierSet) -> bool:
+def satisfies(tag: str | None, specifier: SpecifierSet) -> bool:
     """Checks whether the version in a release tag meets a version specifier."""
     if not specifier:
         return True
-    version = tag_version(tag)
+    version = tag_version(tag) if tag else None
     return version is not None and specifier.contains(version, prereleases=True)
+
+
+def libs_load(libs: list[str]) -> bool:
+    """Checks whether the dynamic loader finds all libraries.
+
+    Loading runs the initialization code of a library, so it happens in a separate process.
+    """
+    code = "import ctypes, sys\nfor name in sys.argv[1:]:\n    ctypes.CDLL(name)"
+    result = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", code, *libs], capture_output=True, check=False
+    )
+    return result.returncode == 0
+
+
+def run_version_command(cmd: list[str], regex: str) -> tuple[bool, str | None]:
+    """Runs a command found in PATH without the bin dir of pmg.
+
+    Returns:
+        Whether the command ran, and the first match of `regex` in its output.
+    """
+    bin_dir = layout()["bin"].resolve()
+    path = os.pathsep.join(
+        entry
+        for entry in os.getenv("PATH", "").split(os.pathsep)
+        if entry and Path(entry).resolve() != bin_dir
+    )
+    executable = shutil.which(cmd[0], path=path)
+    if executable is None:
+        return False, None
+    try:
+        result = subprocess.run(  # noqa: S603
+            [executable, *cmd[1:]], capture_output=True, text=True, check=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):  # pragma: no cover
+        return False, None
+    match = re.search(regex, result.stdout + result.stderr)
+    return True, match.group() if match else None
+
+
+def find_external(name: str, pkg: Package) -> Record | None:
+    """Detects a copy of the package that pmg did not install.
+
+    The files and libraries of the check must exist, and its command must run. Without any of
+    them, the first command of the package is looked up in PATH.
+    """
+    context = make_context(name, pkg, "external")
+    check = pkg.check
+    files = [Path(render(file, context)) for file in check.files]
+    libs = [render(lib, context) for lib in check.libs]
+    if not all(file.exists() for file in files) or (libs and not libs_load(libs)):
+        return None
+    cmd = [render(arg, context) for arg in check.cmd] if check.cmd else None
+    if cmd is None and not files and not libs:
+        commands = [*pkg.bin, *pkg.links]
+        if not commands:
+            return None
+        cmd = [commands[0], *check.args]
+    version = None
+    if cmd is not None:
+        found, version = run_version_command(cmd, check.regex)
+        if not found:
+            return None
+    return Record(
+        name=name,
+        tag="external",
+        explicit=False,
+        active=False,
+        installed_at=time.time(),
+        deps=[],
+        files=[],
+        external=True,
+        external_version=version,
+    )
+
+
+def use_external(  # noqa: PLR0913, PLR0917
+    name: str,
+    pkg: Package,
+    versions: list[Record],
+    explicit: bool,
+    specifier: SpecifierSet,
+    record: bool,
+) -> bool:
+    """Checks for an external version that meets the specifier, found before or detected now.
+
+    Returns:
+        Whether an external version is used, which is recorded if `record` is set.
+    """
+    external = next((version for version in versions if version.external), None)
+    if external is None and not versions:
+        external = find_external(name, pkg)
+    if external is None or not satisfies(external.version_tag, specifier):
+        return False
+    if record:
+        external.explicit = external.explicit or explicit
+        save_record(external)
+        logger.info(
+            "using %s found outside pmg", " ".join(filter(None, [name, external.external_version]))
+        )
+    return True
 
 
 def resolve_install_order(names: list[str]) -> tuple[list[str], dict[str, SpecifierSet]]:
@@ -600,6 +873,32 @@ def resolve_install_order(names: list[str]) -> tuple[list[str], dict[str, Specif
         raise PmgError(f"dependency cycle: {' -> '.join(e.args[1])}") from e
 
 
+def nothing_to_install(  # noqa: PLR0913, PLR0917
+    name: str,
+    pkg: Package,
+    host: Platform,
+    versions: list[Record],
+    explicit: bool,
+    tag: str | None,
+    specifier: SpecifierSet,
+    record_external: bool = True,
+) -> bool:
+    """Checks whether the package is not for the host, or an installed or external one is enough.
+
+    Raises:
+        PmgError: If the package was requested directly but is not for the host.
+    """
+    if pkg.platforms and host not in pkg.platforms:
+        if explicit:
+            raise PmgError(f"{name} is only for {', '.join(pkg.platforms)}, not {host}")
+        return True
+    if tag is not None:
+        return False
+    if not explicit and any(satisfies(r.version_tag, specifier) for r in versions):
+        return True
+    return use_external(name, pkg, versions, explicit, specifier, record_external)
+
+
 def install_package(
     name: str, explicit: bool, tag: str | None = None, specifier: SpecifierSet | None = None
 ) -> None:
@@ -615,18 +914,20 @@ def install_package(
         specifier: Versions its dependents accept; an installed one satisfies a dependency.
 
     Raises:
-        PmgError: If the latest release does not meet the specifier.
+        PmgError: If the package is not for the host, or its latest release does not meet the
+            specifier.
     """
     specifier = specifier or SpecifierSet()
     records = load_records()
-    current = active_version(records, name)
     pkg = load_spec(name)
+    host = detect_platform(pkg.min_glibc_version)
     versions = [record for record in records.values() if record.name == name]
-    if tag is None and not explicit and any(satisfies(r.tag, specifier) for r in versions):
+    if nothing_to_install(name, pkg, host, versions, explicit, tag, specifier):
         return
+    current = active_version(records, name)
     should_activate = tag is None or current is None
     if tag is None:
-        tag = fetch_release(name, pkg)
+        tag = fetch_release(name, pkg, host)
         if not satisfies(tag, specifier):
             raise PmgError(f"a dependency needs {name}{specifier}, the latest release is {tag}")
     record = records.get(f"{name}@{tag}")
@@ -636,10 +937,9 @@ def install_package(
             save_record(record)
         return
     context = make_context(name, pkg, tag)
-    host = detect_platform(pkg.min_glibc_version)
     with target_layout(context) as target:
-        archive = run_download(pkg, context, host, target.parent / "download")
-        run_install(name, pkg, context, archive, target)
+        archives = run_download(pkg, context, host, target.parent / "download")
+        run_install(name, pkg, context, archives, target)
         dirs = owned_dirs(target, context)
         moves = [(path, destination(path, name, tag)) for path in track_installed_files(target)]
         record = Record(
@@ -677,7 +977,8 @@ def uninstall_version(record: Record) -> None:
         PmgError: If the uninstall hook fails.
     """
     pkg = load_spec(record.name) if record.name in available_specs() else None
-    if pkg and pkg.uninstall:
+    # external versions only lose their record
+    if pkg and pkg.uninstall and not record.external:
         context = make_context(record.name, pkg, record.tag)
         run_shell(record.name, "uninstall", render(pkg.uninstall, context))
     if record.active:
@@ -714,7 +1015,8 @@ def uninstall_packages(args: list[str]) -> None:
             for dep in requirements(record.deps)
             if dep.name in names
             and not any(
-                r.name == dep.name and satisfies(r.tag, dep.specifier) for r in remaining.values()
+                r.name == dep.name and satisfies(r.version_tag, dep.specifier)
+                for r in remaining.values()
             )
         ]
         if broken:
@@ -765,6 +1067,35 @@ def exit_on_error() -> Generator[None]:
         raise SystemExit(1) from e
 
 
+def needs_installing(
+    name: str, tags: list[str | None], explicit: bool, specifier: SpecifierSet
+) -> bool:
+    """Checks whether installing may add a version of the package, without recording anything."""
+    pkg = load_spec(name)
+    host = detect_platform(pkg.min_glibc_version)
+    versions = [record for record in load_records().values() if record.name == name]
+    return not all(
+        nothing_to_install(name, pkg, host, versions, explicit, tag, specifier, False)
+        for tag in tags
+    )
+
+
+def needed_packages(
+    requested: dict[str, list[str | None]], order: list[str], specifiers: dict[str, SpecifierSet]
+) -> set[str]:
+    """Returns the requested packages and the dependencies of those that get installed."""
+    needed = set(requested)
+    # dependents come before their dependencies, so a package found outside pmg or not for the
+    # host pulls in none of its dependencies
+    for name in reversed(order):
+        tags = requested.get(name, [None])
+        if name in needed and needs_installing(
+            name, tags, name in requested, specifiers.get(name, SpecifierSet())
+        ):
+            needed |= {dep.name for dep in requirements(load_spec(name).deps)}
+    return needed
+
+
 def install(names: list[str]) -> None:
     """Installs packages and their dependencies.
 
@@ -777,7 +1108,8 @@ def install(names: list[str]) -> None:
             name, _, tag = arg.partition("@")
             requested.setdefault(name, []).append(tag or None)
         order, specifiers = resolve_install_order(list(requested))
-        for name in order:
+        needed = needed_packages(requested, order, specifiers)
+        for name in (name for name in order if name in needed):
             for requested_tag in requested.get(name, []):
                 install_package(name, explicit=True, tag=requested_tag)
             # dependencies, or requested packages whose dependents need other versions
@@ -819,5 +1151,9 @@ def use(name: str) -> None:
 def list_installed() -> None:
     """Lists the installed package versions."""
     for key, record in load_records().items():
-        kind = "explicit" if record.explicit else "dependency"
-        sys.stdout.write(f"{key} {kind}{' active' if record.active else ''}\n")
+        words = [key, "explicit" if record.explicit else "dependency"]
+        if record.active:
+            words.append("active")
+        if record.external:
+            words += ["external", record.external_version or "unknown"]
+        print(" ".join(words))  # noqa: T201

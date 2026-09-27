@@ -36,7 +36,19 @@ class StaticRelease(BaseStruct, tag="static", kw_only=True):
     tag: str
 
 
-Release: TypeAlias = GitHubRelease | CommandRelease | StaticRelease
+class ApkRelease(BaseStruct, tag="apk", kw_only=True):
+    """Stores the Alpine package whose version in the main repo is the latest version."""
+
+    package: str
+
+
+class CondaRelease(BaseStruct, tag="conda", kw_only=True):
+    """Stores the conda channel whose newest build of the asset package is the latest version."""
+
+    channel: str
+
+
+Release: TypeAlias = GitHubRelease | CommandRelease | StaticRelease | ApkRelease | CondaRelease
 
 
 class GitHubDownload(BaseStruct, tag="github", kw_only=True):
@@ -58,7 +70,19 @@ class CommandDownload(BaseStruct, tag="command", kw_only=True):
     cmd: Command
 
 
-Download: TypeAlias = GitHubDownload | UrlDownload | CommandDownload
+class ApkDownload(BaseStruct, tag="apk", kw_only=True):
+    """Stores the Alpine packages unpacked together into the package dir."""
+
+    packages: list[str]
+
+
+class CondaDownload(BaseStruct, tag="conda", kw_only=True):
+    """Stores the conda channel of the asset package."""
+
+    channel: str
+
+
+Download: TypeAlias = GitHubDownload | UrlDownload | CommandDownload | ApkDownload | CondaDownload
 
 
 class Assets(TypedDict):
@@ -99,8 +123,15 @@ class Completions(BaseStruct, kw_only=True):
 
 
 class Check(BaseStruct, kw_only=True):
-    """Stores how to read the version of the installed binary."""
+    """Stores how to detect a copy of the package that pmg did not install."""
 
+    files: list[str] = []
+    """Files that must exist."""
+    libs: list[str] = []
+    """Libraries the dynamic loader must find."""
+    cmd: list[str] | None = None
+    """Command printing the version; without it, files, and libs, the first command of the
+    package with `args` is looked up in PATH."""
     args: list[str] = msgspec.field(default_factory=lambda: ["--version"])
     regex: str = r"\d+(?:\.\d+)+"
     """Pattern whose first match in the output is the version."""
@@ -113,6 +144,8 @@ class Package(BaseStruct, kw_only=True):
     download: Download
     deps: list[str] = []
     """Names of the packages this one needs, each optionally with a version specifier."""
+    platforms: list[Platform] = []
+    """Platforms the package is for, if not all; other hosts skip it as a dependency."""
     external: External
     min_glibc: str | None = None
     """Oldest glibc for the glibc assets; older glibc hosts get the musl assets."""
@@ -121,8 +154,12 @@ class Package(BaseStruct, kw_only=True):
     """Package dir, if not {{ data }}/<name>."""
     dirs: dict[str, str] = {}
     """Extra dirs owned by the package, available as {{ dirs.<key> }}."""
-    content: bool = False
-    """Whether the unpacked archive becomes the package dir."""
+    content: bool | str = False
+    """Whether the unpacked archive, or its subdir matching this glob, becomes the package dir."""
+    keep: list[str] = []
+    """Globs of the only files kept in the package dir."""
+    remove: list[str] = []
+    """Globs of files removed from the package dir."""
     bin: dict[str, str] = {}
     """Name in the bin dir mapped to the path in the archive, without a single top-level dir."""
     links: dict[str, str] = {}
@@ -179,6 +216,15 @@ class Record(BaseStruct, kw_only=True):
     """Absolute paths of the installed files."""
     dirs: list[str] = []
     """Absolute paths of the dirs owned by the package."""
+    external: bool = False
+    """Whether the version was found outside pmg, which then leaves its files alone."""
+    external_version: str | None = None
+    """Version printed by the command of an external version."""
+
+    @property
+    def version_tag(self) -> str | None:
+        """Tag, or the version of an external version, compared against version specifiers."""
+        return self.external_version if self.external else self.tag
 
     @property
     def key(self) -> str:
@@ -190,6 +236,7 @@ class Context(msgspec.Struct, kw_only=True):
     """Stores the values of the template variables for a package."""
 
     tag: str
+    arch: str
     data: Path
     bin: Path
     dir: Path
@@ -200,6 +247,7 @@ class Context(msgspec.Struct, kw_only=True):
         return {
             "tag": self.tag,
             "version": self.tag.removeprefix("v"),
+            "arch": self.arch,
             "data": str(self.data),
             "bin": str(self.bin),
             "dir": str(self.dir),
@@ -214,6 +262,16 @@ class GitHubAsset(msgspec.Struct, kw_only=True):
     browser_download_url: str
     digest: str | None = None
     """Checksum as "sha256:<hex>", only for assets uploaded since mid 2025."""
+
+
+class CondaFile(msgspec.Struct, kw_only=True):
+    """Stores a file of a package from the anaconda.org API."""
+
+    version: str
+    basename: str
+    """Path in the channel, e.g. linux-64/sysroot_linux-64-2.28-h4a8ded7_9.conda."""
+    upload_time: str
+    sha256: str | None = None
 
 
 class GitHubReleaseInfo(msgspec.Struct, kw_only=True):
