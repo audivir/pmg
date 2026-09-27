@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
-from typing import Annotated, Literal, NotRequired, TypeAlias, TypedDict
+from typing import Literal, NotRequired, TypeAlias, TypedDict
 
 import msgspec
+from packaging.requirements import Requirement
+from packaging.version import InvalidVersion, Version
 
 Command: TypeAlias = str
 Platform: TypeAlias = Literal["glibc_x64", "glibc_arm64", "musl_x64", "musl_arm64", "macos_arm64"]
@@ -109,8 +112,9 @@ class Package(BaseStruct, kw_only=True):
     release: Release
     download: Download
     deps: list[str] = []
+    """Names of the packages this one needs, each optionally with a version specifier."""
     external: External
-    min_glibc: Annotated[str, msgspec.Meta(pattern=r"^\d+(\.\d+)*$")] | None = None
+    min_glibc: str | None = None
     """Oldest glibc for the glibc assets; older glibc hosts get the musl assets."""
     assets: Assets
     dir: str | None = None
@@ -137,7 +141,14 @@ class Package(BaseStruct, kw_only=True):
     """Shell command for extra cleanup, run before the installed files are removed."""
 
     def __post_init__(self) -> None:
-        """Takes the download repo from the release if it is not set."""
+        """Validates the dependencies and `min_glibc`, and takes the download repo from the release.
+
+        Raises:
+            ValueError: If a dependency, `min_glibc`, or the download repo is invalid.
+        """
+        requirements(self.deps)
+        if self.min_glibc:
+            Version(self.min_glibc)
         dl, rl = self.download, self.release
         if isinstance(dl, GitHubDownload) and not dl.repo:
             if not isinstance(rl, GitHubRelease):  # pragma: no cover
@@ -147,11 +158,9 @@ class Package(BaseStruct, kw_only=True):
             dl.repo = rl.repo
 
     @property
-    def min_glibc_tuple(self) -> tuple[int, ...] | None:
-        """Oldest glibc for the glibc assets as an integer tuple."""
-        if not self.min_glibc:
-            return None
-        return version_tuple(self.min_glibc)
+    def min_glibc_version(self) -> Version | None:
+        """Oldest glibc for the glibc assets as a version."""
+        return Version(self.min_glibc) if self.min_glibc else None
 
 
 class Record(BaseStruct, kw_only=True):
@@ -165,6 +174,7 @@ class Record(BaseStruct, kw_only=True):
     """Whether the plain names in the shared layout link to this version."""
     installed_at: float
     deps: list[str]
+    """Dependencies of the version, as in the spec."""
     files: list[str]
     """Absolute paths of the installed files."""
     dirs: list[str] = []
@@ -213,6 +223,25 @@ class GitHubReleaseInfo(msgspec.Struct, kw_only=True):
     assets: list[GitHubAsset]
 
 
-def version_tuple(version: str) -> tuple[int, ...]:
-    """Converts a dot-separated version to an integer tuple."""
-    return tuple(int(part) for part in version.split("."))
+def requirements(deps: list[str]) -> list[Requirement]:
+    """Parses dependencies like "lib" or "lib>=1.2,<2".
+
+    Raises:
+        ValueError: If a dependency is invalid or has extras, markers, or a URL.
+    """
+    parsed = [Requirement(dep) for dep in deps]
+    for requirement in parsed:
+        if requirement.extras or requirement.marker or requirement.url:  # pragma: no cover
+            raise ValueError(f"only a name and a version specifier are allowed: {requirement}")
+    return parsed
+
+
+def tag_version(tag: str) -> Version | None:
+    """Returns the first version in a release tag, e.g. 1.27.1 in go1.27.1."""
+    match = re.search(r"\d+(?:\.\d+)*", tag)
+    if match is None:  # pragma: no cover
+        return None
+    try:
+        return Version(match.group())
+    except InvalidVersion:  # pragma: no cover
+        return None

@@ -32,6 +32,8 @@ from urllib.parse import urlsplit
 import jinja2
 import msgspec
 from mxhttp import BearerAuth, Downloader, RawPath, SyncConsumer, base_url, get
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 
 from pmg.models import (
     CommandDownload,
@@ -43,7 +45,8 @@ from pmg.models import (
     Package,
     Platform,
     Record,
-    version_tuple,
+    requirements,
+    tag_version,
 )
 
 if TYPE_CHECKING:
@@ -227,16 +230,16 @@ def render(template: str, context: Context, **extra: str) -> str:
     return jinja_env().from_string(template).render(**context.variables(), **extra)
 
 
-def glibc_version() -> tuple[int, ...] | None:
+def glibc_version() -> Version | None:
     """Returns the glibc version of the host, or None on musl and macOS."""
+    value: str | None = None
     with contextlib.suppress(ValueError, OSError):
-        # glibc hosts always report a version, other hosts raise.
-        if value := os.confstr("CS_GNU_LIBC_VERSION"):  # pragma: no branch
-            return version_tuple(value.removeprefix("glibc "))
-    return None
+        # only glibc knows the name, other hosts raise.
+        value = os.confstr("CS_GNU_LIBC_VERSION")
+    return Version(value.removeprefix("glibc ")) if value else None
 
 
-def detect_platform(min_glibc: tuple[int, ...] | None) -> Platform:
+def detect_platform(min_glibc: Version | None) -> Platform:
     """Returns the host platform, using the musl assets for glibc hosts older than `min_glibc`.
 
     Raises:
@@ -559,13 +562,26 @@ def rewind_state(moved: list[Path]) -> None:
         remove_path(path)
 
 
-def resolve_install_order(names: list[str]) -> list[str]:
-    """Returns the packages and all their dependencies, each dependency before its dependents.
+def satisfies(tag: str, specifier: SpecifierSet) -> bool:
+    """Checks whether the version in a release tag meets a version specifier."""
+    if not specifier:
+        return True
+    version = tag_version(tag)
+    return version is not None and specifier.contains(version, prereleases=True)
+
+
+def resolve_install_order(names: list[str]) -> tuple[list[str], dict[str, SpecifierSet]]:
+    """Resolves the packages and all their dependencies.
+
+    Returns:
+        Packages with each dependency before its dependents, and the combined version specifier
+        of their dependents for each dependency.
 
     Raises:
         PmgError: If the dependencies form a cycle.
     """
     sorter: graphlib.TopologicalSorter[str] = graphlib.TopologicalSorter()
+    specifiers: dict[str, SpecifierSet] = {}
     pending = list(names)
     seen: set[str] = set()
     while pending:
@@ -573,16 +589,20 @@ def resolve_install_order(names: list[str]) -> list[str]:
         if name in seen:
             continue
         seen.add(name)
-        deps = load_spec(name).deps
-        sorter.add(name, *deps)
-        pending.extend(deps)
+        deps = requirements(load_spec(name).deps)
+        sorter.add(name, *(dep.name for dep in deps))
+        for dep in deps:
+            specifiers[dep.name] = specifiers.get(dep.name, SpecifierSet()) & dep.specifier
+            pending.append(dep.name)
     try:
-        return list(sorter.static_order())
+        return list(sorter.static_order()), specifiers
     except graphlib.CycleError as e:
         raise PmgError(f"dependency cycle: {' -> '.join(e.args[1])}") from e
 
 
-def install_package(name: str, explicit: bool, tag: str | None = None) -> None:
+def install_package(
+    name: str, explicit: bool, tag: str | None = None, specifier: SpecifierSet | None = None
+) -> None:
     """Installs a version of a package without its dependencies.
 
     Installs the latest version, or `tag`. The latest version becomes active; a given tag only if
@@ -592,16 +612,23 @@ def install_package(name: str, explicit: bool, tag: str | None = None) -> None:
         name: Name of the package.
         explicit: Whether the package was requested directly.
         tag: Release tag to install instead of the latest one.
+        specifier: Versions its dependents accept; an installed one satisfies a dependency.
+
+    Raises:
+        PmgError: If the latest release does not meet the specifier.
     """
+    specifier = specifier or SpecifierSet()
     records = load_records()
     current = active_version(records, name)
     pkg = load_spec(name)
-    if tag is None and current is not None and not explicit:
-        # any version satisfies a dependency.
+    versions = [record for record in records.values() if record.name == name]
+    if tag is None and not explicit and any(satisfies(r.tag, specifier) for r in versions):
         return
     should_activate = tag is None or current is None
     if tag is None:
         tag = fetch_release(name, pkg)
+        if not satisfies(tag, specifier):
+            raise PmgError(f"a dependency needs {name}{specifier}, the latest release is {tag}")
     record = records.get(f"{name}@{tag}")
     if record is not None:
         if explicit and not record.explicit:
@@ -609,7 +636,7 @@ def install_package(name: str, explicit: bool, tag: str | None = None) -> None:
             save_record(record)
         return
     context = make_context(name, pkg, tag)
-    host = detect_platform(pkg.min_glibc_tuple)
+    host = detect_platform(pkg.min_glibc_version)
     with target_layout(context) as target:
         archive = run_download(pkg, context, host, target.parent / "download")
         run_install(name, pkg, context, archive, target)
@@ -679,15 +706,26 @@ def uninstall_packages(args: list[str]) -> None:
             raise PmgError(f"not installed: {arg}")
         removing |= keys
     remaining = {key: r for key, r in records.items() if key not in removing}
-    gone = {records[key].name for key in removing} - {r.name for r in remaining.values()}
-    for record in remaining.values():
-        if needed := sorted(gone.intersection(record.deps)):
-            raise PmgError(f"{record.name} depends on {', '.join(needed)}")
     names = {records[key].name for key in removing}
+    gone = names - {r.name for r in remaining.values()}
+    for record in remaining.values():
+        broken = [
+            str(dep)
+            for dep in requirements(record.deps)
+            if dep.name in names
+            and not any(
+                r.name == dep.name and satisfies(r.tag, dep.specifier) for r in remaining.values()
+            )
+        ]
+        if broken:
+            raise PmgError(f"{record.name} depends on {', '.join(sorted(broken))}")
     sorter = graphlib.TopologicalSorter(
         {
             name: {
-                dep for key in removing if records[key].name == name for dep in records[key].deps
+                dep.name
+                for key in removing
+                if records[key].name == name
+                for dep in requirements(records[key].deps)
             }
             & names
             for name in names
@@ -711,7 +749,9 @@ def find_orphans(records: dict[str, Record]) -> list[str]:
         if name in required:
             continue
         required.add(name)
-        pending.extend(dep for r in records.values() if r.name == name for dep in r.deps)
+        pending.extend(
+            dep.name for r in records.values() if r.name == name for dep in requirements(r.deps)
+        )
     return sorted(key for key, record in records.items() if record.name not in required)
 
 
@@ -736,9 +776,13 @@ def install(names: list[str]) -> None:
         for arg in names:
             name, _, tag = arg.partition("@")
             requested.setdefault(name, []).append(tag or None)
-        for name in resolve_install_order(list(requested)):
-            for requested_tag in requested.get(name, [None]):
-                install_package(name, explicit=name in requested, tag=requested_tag)
+        order, specifiers = resolve_install_order(list(requested))
+        for name in order:
+            for requested_tag in requested.get(name, []):
+                install_package(name, explicit=True, tag=requested_tag)
+            # dependencies, or requested packages whose dependents need other versions
+            if name not in requested or name in specifiers:
+                install_package(name, explicit=False, specifier=specifiers.get(name))
 
 
 def uninstall(names: list[str]) -> None:

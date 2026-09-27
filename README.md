@@ -74,16 +74,27 @@ pmg. `PMG_HOME` defaults to `$XDG_DATA_HOME/pmg` and also holds the install reco
 ```bash
 python -m pmg install bat
 python -m pmg install bat@v0.25.0
+python -m pmg use bat@v0.25.0
 python -m pmg list
-python -m pmg uninstall bat
+python -m pmg uninstall bat@v0.25.0
 python -m pmg autoremove
 ```
 
-- `install` also installs the dependencies, listed in `deps`. `name@tag` installs the release with
-  that tag instead of the latest one, using the tag as the project writes it (`bat@v0.25.0`,
-  `zig@0.15.1`).
-- `uninstall` refuses while another installed package depends on the package.
+- `install` installs the latest release. `name@tag` installs the release with that tag, written as
+  the project writes it (`bat@v0.25.0`, `zig@0.15.1`).
+- Versions are installed side by side. Commands get `@tag` appended (`bat@v0.26.1`), and the package
+  directory is `$XDG_DATA_HOME/<name>@<tag>`. The plain names of the commands, man pages, and
+  completions link to the active version: the latest install, or a given tag if no other version
+  is active. `use` switches the active version.
+- `install` also installs the dependencies, listed in `deps` with optional version specifiers like
+  `"lib>=1.2,<2"`. An installed version that meets them is enough, otherwise the latest release is
+  installed. The version of a tag is its first number, e.g. `1.27.1` in `go1.27.1`.
+- `uninstall` removes all versions of a package, or one given as `name@tag`. It refuses if a
+  remaining package would miss a dependency. If the active version goes, the most recently
+  installed of the others becomes active.
 - `autoremove` removes dependencies that no directly installed package needs anymore.
+- `list` shows each installed version, whether it was installed directly or as a dependency, and
+  whether it is active.
 - Set `PMG_GH_TOKEN` (or `GH_TOKEN`) to avoid the rate limit of the GitHub API.
 
 ## License

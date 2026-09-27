@@ -389,6 +389,29 @@ def test_install_promotes_dependency_to_explicit(env: Env) -> None:
     assert env.installed() == {"lib@v1.0": "explicit active"}
 
 
+def test_dependency_version_specifier(env: Env) -> None:
+    for version in ("1.0", "2.0"):
+        env.add_package("lib", version=version)
+    env.add_package("app", deps=("lib>=2.0",))
+    env.pmg("install", "lib@v1.0")
+    # v1.0 is too old for app, so the latest lib comes in next to it
+    env.pmg("install", "app")
+    assert env.installed() == {
+        "app@v1.0": "explicit active",
+        "lib@v1.0": "explicit",
+        "lib@v2.0": "dependency active",
+    }
+    assert "app depends on lib>=2.0" in env.pmg("uninstall", "lib@v2.0", ok=False).stderr
+    env.pmg("uninstall", "lib@v1.0")
+
+
+def test_dependency_version_not_released(env: Env) -> None:
+    env.add_package("lib")
+    env.add_package("app", deps=("lib>=3.0",))
+    stderr = env.pmg("install", "app", ok=False).stderr
+    assert "needs lib>=3.0, the latest release is v1.0" in stderr
+
+
 def test_uninstall_refuses_needed_dependency(env: Env) -> None:
     env.add_package("app", deps=("lib",))
     env.add_package("lib")
