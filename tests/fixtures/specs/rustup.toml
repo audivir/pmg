@@ -1,7 +1,7 @@
 # rustup updates itself and its toolchains, so pmg owns the dirs rather than their files;
 # cargo install adds binaries to cargo/bin, which is why it is a PATH entry instead of links
-dirs = { rustup = "{{ data }}/rustup", cargo = "{{ data }}/cargo" }
-env = { RUSTUP_HOME = "{{ dirs.rustup }}", CARGO_HOME = "{{ dirs.cargo }}" }
+dirs = { cargo = "{{ data }}/cargo" }
+env = { RUSTUP_HOME = "{{ dir }}", CARGO_HOME = "{{ dirs.cargo }}" }
 paths = ["{{ dirs.cargo }}/bin"]
 check = { cmd = ["{{ dirs.cargo }}/bin/rustup", "--version"] }
 upgrade = "{{ dirs.cargo }}/bin/rustup self update"

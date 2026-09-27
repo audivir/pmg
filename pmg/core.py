@@ -2,8 +2,12 @@
 
 Package specs are TOML files named after the package, searched in `$PMG_SPECS_DIR`, then in
 `$PMG_HOME/specs`, then in the specs shipped with pmg. Templates in a spec are Jinja templates with
-{{ tag }} (the release tag, e.g. "v0.26.1"), {{ version }} (the tag without a leading "v"), and
-{{ asset }} (the asset file name).
+{{ tag }} (the release tag, e.g. "v0.26.1"), {{ version }} (the tag without a leading "v"),
+{{ data }} (`$XDG_DATA_HOME`), {{ bin }} (the bin dir), {{ dir }} (the package dir),
+{{ dirs.<key> }} (the extra dirs of the package), and, for files, {{ asset }} (the asset name).
+
+Packages install their commands, man pages, and completions into the shared layout below `~/.local`
+and everything else into their own dirs below `$XDG_DATA_HOME`, which they own as a whole.
 """
 
 from __future__ import annotations
@@ -45,6 +49,8 @@ HOST_PLATFORMS: dict[tuple[str, str], Platform] = {
     ("macos", "arm64"): "macos_arm64",
 }
 """Platform for each libc and machine, as reported by `platform.machine`."""
+COMPLETION_NAMES = {"zsh": "_{}", "bash": "{}", "fish": "{}.fish"}
+"""File name of the completion script of a command for each shell."""
 TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2")
 
 logger = logging.getLogger("pmg")
@@ -121,6 +127,23 @@ class External(BaseStruct, kw_only=True):
     yum: str | None = None
 
 
+class GeneratedCompletion(BaseStruct, kw_only=True):
+    """Stores the shell command printing a completion script, run with the staged bin in PATH."""
+
+    cmd: Command
+
+
+Completion: TypeAlias = str | GeneratedCompletion
+
+
+class Completions(BaseStruct, kw_only=True):
+    """Stores the completion script of a command for each shell, as archive path or command."""
+
+    zsh: Completion | None = None
+    bash: Completion | None = None
+    fish: Completion | None = None
+
+
 class Check(BaseStruct, kw_only=True):
     """Stores how to read the version of the installed binary."""
 
@@ -139,11 +162,26 @@ class Package(BaseStruct, kw_only=True):
     min_glibc: Annotated[str, msgspec.Meta(pattern=r"^\d+(\.\d+)*$")] | None = None
     """Oldest glibc for the glibc assets; older glibc hosts get the musl assets."""
     assets: Assets
+    dir: str | None = None
+    """Package dir, if not {{ data }}/<name>."""
+    dirs: dict[str, str] = {}
+    """Extra dirs owned by the package, available as {{ dirs.<key> }}."""
+    content: bool = False
+    """Whether the unpacked archive becomes the package dir."""
     bin: dict[str, str] = {}
     """Name in the bin dir mapped to the path in the archive, without a single top-level dir."""
+    links: dict[str, str] = {}
+    """Name in the bin dir mapped to the target of a symlink."""
+    man: list[str] = []
+    """Paths of man pages in the archive; the file extension is the section."""
+    completions: dict[str, Completions] = {}
+    """Command mapped to its completion scripts."""
     check: Check
     post_install: Command | None = None
-    """Shell command run in the staging dir, which is also in `PREFIX`, e.g. to patchelf."""
+    """Shell command run in the staging dir `PREFIX`, e.g. to patchelf.
+
+    The staging dir has `bin`, `man`, `zsh`, `bash`, `fish`, `dir`, and `dirs/<key>`.
+    """
     uninstall: Command | None = None
     """Shell command for extra cleanup, run before the installed files are removed."""
 
@@ -174,6 +212,29 @@ class Record(BaseStruct, kw_only=True):
     deps: list[str]
     files: list[str]
     """Absolute paths of the installed files."""
+    dirs: list[str] = []
+    """Absolute paths of the dirs owned by the package."""
+
+
+class Context(msgspec.Struct, kw_only=True):
+    """Stores the values of the template variables for a package."""
+
+    tag: str
+    data: Path
+    bin: Path
+    dir: Path
+    dirs: dict[str, Path]
+
+    def variables(self) -> dict[str, object]:
+        """Template variables, with paths as strings."""
+        return {
+            "tag": self.tag,
+            "version": self.tag.removeprefix("v"),
+            "data": str(self.data),
+            "bin": str(self.bin),
+            "dir": str(self.dir),
+            "dirs": {key: str(path) for key, path in self.dirs.items()},
+        }
 
 
 class GitHubAsset(msgspec.Struct, kw_only=True):
@@ -213,11 +274,16 @@ class Files(SyncConsumer):
         """Binds the download of a path on the host."""
 
 
+def data_home() -> Path:
+    """Returns `$XDG_DATA_HOME`."""
+    return Path(os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+
+
 def pmg_home() -> Path:
     """Returns the directory of the install records, the staging dirs, and the user specs."""
     if home := os.getenv("PMG_HOME"):
         return Path(home)
-    return Path(os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "pmg"
+    return data_home() / "pmg"
 
 
 def spec_dirs() -> list[Path]:
@@ -238,8 +304,28 @@ def available_specs() -> dict[str, Path]:
 
 
 def layout() -> dict[str, Path]:
-    """Maps each top-level dir of the staging layout to its install location."""
-    return {"bin": Path(os.getenv("XDG_BIN_HOME") or Path.home() / ".local" / "bin")}
+    """Maps each top-level dir of the shared staging layout to its install location."""
+    data = data_home()
+    return {
+        "bin": Path(os.getenv("XDG_BIN_HOME") or Path.home() / ".local" / "bin"),
+        "man": data / "man",
+        "zsh": data / "zsh" / "site-functions",
+        "bash": data / "bash-completion" / "completions",
+        "fish": data / "fish" / "vendor_completions.d",
+    }
+
+
+def make_context(name: str, pkg: Package, tag: str) -> Context:
+    """Resolves the template variables of a package."""
+    data, bin_dir = data_home(), layout()["bin"]
+    base = Context(tag=tag, data=data, bin=bin_dir, dir=data / name, dirs={})
+    return Context(
+        tag=tag,
+        data=data,
+        bin=bin_dir,
+        dir=Path(render(pkg.dir, base)) if pkg.dir else base.dir,
+        dirs={key: Path(render(value, base)) for key, value in pkg.dirs.items()},
+    )
 
 
 def decode(spec: str) -> Package:
@@ -308,9 +394,9 @@ def jinja_env() -> jinja2.Environment:
     return jinja2.Environment(undefined=jinja2.StrictUndefined, keep_trailing_newline=True)  # noqa: S701
 
 
-def render(template: str, tag: str, **extra: str) -> str:
-    """Renders a spec template with the tag, the version, and extra variables."""
-    return jinja_env().from_string(template).render(tag=tag, version=tag.removeprefix("v"), **extra)
+def render(template: str, context: Context, **extra: str) -> str:
+    """Renders a spec template with the variables of the package and extra variables."""
+    return jinja_env().from_string(template).render(**context.variables(), **extra)
 
 
 def glibc_version() -> tuple[int, ...] | None:
@@ -344,13 +430,21 @@ def detect_platform(min_glibc: tuple[int, ...] | None) -> Platform:
 
 
 def fetch_release(pkg: Package) -> str:
-    """Returns the latest tag."""
+    """Returns the latest tag.
+
+    Raises:
+        PmgError: If a release command prints no tag.
+    """
     rl = pkg.release
     if isinstance(rl, GitHubRelease):
         return github_api().latest_release(*split_repo(rl.repo)).tag_name
     if isinstance(rl, CommandRelease):
         # spec commands are shell commands by design.
-        return subprocess.check_output(rl.cmd, shell=True, text=True).strip()  # noqa: S602
+        tag = subprocess.check_output(rl.cmd, shell=True, text=True).strip()  # noqa: S602
+        # a failing command early in a pipeline goes unnoticed, but leaves the output empty.
+        if not tag:
+            raise PmgError(f"release command printed no tag: {rl.cmd}")
+        return tag
     return rl.tag
 
 
@@ -363,7 +457,7 @@ def download_file(url: str, dest: Path, checksum: str | None = None) -> Path:
     return files.download(path=path)(dest, checksum=checksum, overwrite=True)
 
 
-def run_download(pkg: Package, tag: str, host: Platform, dl_dir: StrPath) -> Path:
+def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath) -> Path:
     """Renders the url with the host asset and downloads the data to `dl_dir`.
 
     Raises:
@@ -376,7 +470,8 @@ def run_download(pkg: Package, tag: str, host: Platform, dl_dir: StrPath) -> Pat
     asset_template = pkg.assets.get(host)
     if asset_template is None:  # pragma: no cover
         raise PmgError(f"no asset for {host}")
-    asset = render(asset_template, tag)
+    asset = render(asset_template, context)
+    tag = context.tag
     if isinstance(dl, GitHubDownload):
         if not dl.repo:  # pragma: no cover
             raise RuntimeError("GitHubDownload's repo not set in __post_init__")
@@ -385,7 +480,7 @@ def run_download(pkg: Package, tag: str, host: Platform, dl_dir: StrPath) -> Pat
         if found is None:  # pragma: no cover
             raise PmgError(f"{dl.repo} {tag} has no asset {asset}")
         return download_file(found.browser_download_url, dl_dir / asset, found.digest)
-    url = render(dl.url, tag, asset=asset)
+    url = render(dl.url, context, asset=asset)
     return download_file(url, dl_dir / Path(urlsplit(url).path).name)
 
 
@@ -416,47 +511,106 @@ def unpack(archive: Path, dest: Path) -> Path:
 
 
 @contextlib.contextmanager
-def target_layout() -> Generator[Path]:
+def target_layout(context: Context) -> Generator[Path]:
     """Creates a staging dir with the install layout, next to the installed files."""
     staging_root = pmg_home() / "tmp"
     staging_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=staging_root) as tmp:
         target = Path(tmp) / "target"
-        for sub in layout():
+        for sub in [*layout(), "dir", *(f"dirs/{key}" for key in context.dirs)]:
             (target / sub).mkdir(parents=True)
         yield target
 
 
-def run_install(name: str, pkg: Package, tag: str, archive: Path, target: Path) -> None:
-    """Unpacks the archive and places the files of the package in the staging dir.
+def run_shell(name: str, step: str, cmd: str, target: Path, **env: str) -> str:
+    """Runs a spec command in the staging dir and returns its output.
 
     Raises:
-        PmgError: If a file is missing from the archive or `post_install` fails.
+        PmgError: If the command fails.
+    """
+    try:
+        return subprocess.check_output(  # noqa: S602
+            cmd, shell=True, cwd=target, text=True, env={**os.environ, "PREFIX": str(target), **env}
+        )
+    except subprocess.CalledProcessError as e:
+        raise PmgError(f"{step} of {name} failed with exit code {e.returncode}") from e
+
+
+def stage_files(
+    pkg: Package, context: Context, content: Path, asset: str, target: Path
+) -> list[tuple[str, Path]]:
+    """Places commands, links, man pages, and completion files in the staging dir.
+
+    Returns:
+        Commands of the generated completions, with the path for their output.
+
+    Raises:
+        PmgError: If a file is missing from the archive.
+    """
+
+    def source(template: str) -> Path:
+        path = content / render(template, context, asset=asset)
+        if not path.is_file():  # pragma: no cover
+            raise PmgError(f"{asset} has no {path.relative_to(content)}")
+        return path
+
+    for bin_name, template in pkg.bin.items():
+        dest = target / "bin" / bin_name
+        shutil.copy2(source(template), dest)
+        dest.chmod(dest.stat().st_mode | 0o111)
+    for bin_name, template in pkg.links.items():
+        (target / "bin" / bin_name).symlink_to(render(template, context))
+    for template in pkg.man:
+        page = source(template)
+        section = Path(page.name.removesuffix(".gz")).suffix.removeprefix(".")
+        (target / "man" / f"man{section}").mkdir(exist_ok=True)
+        shutil.copy2(page, target / "man" / f"man{section}" / page.name)
+    generated: list[tuple[str, Path]] = []
+    for command, completions in pkg.completions.items():
+        for shell, file_name in COMPLETION_NAMES.items():
+            completion = getattr(completions, shell)
+            dest = target / shell / file_name.format(command)
+            if isinstance(completion, str):
+                shutil.copy2(source(completion), dest)
+            elif completion is not None:
+                generated.append((completion.cmd, dest))
+    return generated
+
+
+def run_install(name: str, pkg: Package, context: Context, archive: Path, target: Path) -> None:
+    """Unpacks the archive and places the files and dirs of the package in the staging dir.
+
+    Raises:
+        PmgError: If a file is missing from the archive or a spec command fails.
     """
     content = unpack(archive, target.parent / "unpacked")
-    for bin_name, path_template in pkg.bin.items():
-        source = content / render(path_template, tag, asset=archive.name)
-        if not source.is_file():  # pragma: no cover
-            raise PmgError(f"{archive.name} has no {source.relative_to(content)}")
-        dest = target / "bin" / bin_name
-        shutil.copy2(source, dest)
-        dest.chmod(dest.stat().st_mode | 0o111)
+    generated = stage_files(pkg, context, content, archive.name, target)
+    if pkg.content:
+        (target / "dir").rmdir()
+        shutil.move(content, target / "dir")
     if pkg.post_install:
-        try:
-            subprocess.check_call(  # noqa: S602
-                pkg.post_install, shell=True, cwd=target, env={**os.environ, "PREFIX": str(target)}
-            )
-        except subprocess.CalledProcessError as e:
-            raise PmgError(f"post_install of {name} failed with exit code {e.returncode}") from e
+        run_shell(name, "post_install", render(pkg.post_install, context), target)
+    staged_path = f"{target / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+    for cmd, dest in generated:
+        dest.write_text(run_shell(name, "completion", cmd, target, PATH=staged_path))
 
 
 def track_installed_files(target: Path) -> list[Path]:
-    """Returns the files in the staging dir, relative to it."""
+    """Returns the files in the shared layout of the staging dir, relative to it."""
     return sorted(
         path.relative_to(target)
-        for path in target.rglob("*")
+        for root in layout()
+        for path in (target / root).rglob("*")
         if path.is_file() or path.is_symlink()
     )
+
+
+def owned_dirs(target: Path, context: Context) -> dict[Path, Path]:
+    """Maps the staged dirs of the package that have content to their install locations."""
+    staged = {target / "dir": context.dir} | {
+        target / "dirs" / key: path for key, path in context.dirs.items()
+    }
+    return {path: dest for path, dest in staged.items() if any(path.iterdir())}
 
 
 def destination(relative: Path) -> Path:
@@ -471,27 +625,27 @@ def destination(relative: Path) -> Path:
     return roots[relative.parts[0]].joinpath(*relative.parts[1:])
 
 
-def verify_no_overwrites(name: str, files: list[Path]) -> None:
-    """Checks that no file of the package would replace an existing one.
+def verify_no_overwrites(name: str, files: list[Path], dirs: list[Path]) -> None:
+    """Checks that no file or dir of the package would replace an existing one.
 
     Raises:
         PmgError: If an install location is already taken.
     """
-    for relative in files:
-        dest = destination(relative)
+    for dest in [*(destination(relative) for relative in files), *dirs]:
         if dest.exists() or dest.is_symlink():
             raise PmgError(f"{dest} exists and does not belong to {name}")
 
 
-def move_data(target: Path, files: list[Path]) -> list[Path]:
-    """Moves the staged files to their install locations and returns those locations."""
+def move_data(target: Path, files: list[Path], dirs: dict[Path, Path]) -> list[Path]:
+    """Moves the staged files and dirs to their install locations and returns those locations."""
+    moves = [(target / relative, destination(relative)) for relative in files]
+    moves += dirs.items()
     moved: list[Path] = []
     try:
-        for relative in files:
-            dest = destination(relative)
+        for staged, dest in moves:
             dest.parent.mkdir(parents=True, exist_ok=True)
             # a rename, so atomic, as the staging dir is on the same filesystem.
-            shutil.move(target / relative, dest)
+            shutil.move(staged, dest)
             moved.append(dest)
     except BaseException:
         rewind_state(moved)
@@ -499,10 +653,18 @@ def move_data(target: Path, files: list[Path]) -> list[Path]:
     return moved
 
 
-def rewind_state(moved: list[Path]) -> None:
-    """Removes the files moved by a failed install."""
-    for path in moved:
+def remove_path(path: Path) -> None:
+    """Removes a file, a symlink, or a dir tree, if it exists."""
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
         path.unlink(missing_ok=True)
+
+
+def rewind_state(moved: list[Path]) -> None:
+    """Removes the files and dirs moved by a failed install."""
+    for path in moved:
+        remove_path(path)
 
 
 def resolve_install_order(names: list[str]) -> list[str]:
@@ -538,18 +700,24 @@ def install_package(name: str, explicit: bool) -> None:
         return
     pkg = load_spec(name)
     tag = fetch_release(pkg)
+    context = make_context(name, pkg, tag)
     host = detect_platform(pkg.min_glibc_tuple)
-    with target_layout() as target:
-        archive = run_download(pkg, tag, host, target.parent / "download")
-        run_install(name, pkg, tag, archive, target)
+    with target_layout(context) as target:
+        archive = run_download(pkg, context, host, target.parent / "download")
+        run_install(name, pkg, context, archive, target)
         files = track_installed_files(target)
-        verify_no_overwrites(name, files)
-        moved = move_data(target, files)
+        dirs = owned_dirs(target, context)
+        verify_no_overwrites(name, files, list(dirs.values()))
+        moved = move_data(target, files, dirs)
         try:
-            save_record(
-                name,
-                Record(tag=tag, explicit=explicit, deps=pkg.deps, files=[str(p) for p in moved]),
+            record = Record(
+                tag=tag,
+                explicit=explicit,
+                deps=pkg.deps,
+                files=[str(path) for path in moved[: len(files)]],
+                dirs=[str(path) for path in moved[len(files) :]],
             )
+            save_record(name, record)
         except BaseException:
             rewind_state(moved)
             raise
@@ -562,14 +730,15 @@ def uninstall_package(name: str, record: Record) -> None:
     Raises:
         PmgError: If the uninstall hook fails.
     """
-    hook = load_spec(name).uninstall if name in available_specs() else None
-    if hook:
+    pkg = load_spec(name) if name in available_specs() else None
+    if pkg and pkg.uninstall:
+        hook = render(pkg.uninstall, make_context(name, pkg, record.tag))
         try:
             subprocess.check_call(hook, shell=True)  # noqa: S602
         except subprocess.CalledProcessError as e:  # pragma: no cover
             raise PmgError(f"uninstall of {name} failed with exit code {e.returncode}") from e
-    for path in record.files:
-        Path(path).unlink(missing_ok=True)
+    for path in [*record.files, *record.dirs]:
+        remove_path(Path(path))
     record_path(name).unlink()
     logger.info("uninstalled %s", name)
 

@@ -78,6 +78,10 @@ class Env:
         return self.home / ".local" / "bin"
 
     @property
+    def data(self) -> Path:
+        return self.home / ".local" / "share"
+
+    @property
     def pmg_home(self) -> Path:
         return self.root / "pmg-home"
 
@@ -93,15 +97,23 @@ class Env:
         glibc_asset: str | None = None,
         post_install: str | None = None,
         uninstall: str | None = None,
+        script: str | None = None,
+        files: dict[str, str] | None = None,
+        spec: tuple[str, ...] = (),
+        bin_entry: bool = True,
     ) -> None:
-        script = f"#!/bin/sh\necho {name} {version}\n".encode()
+        script_bytes = (script or f"#!/bin/sh\necho {name} {version}\n").encode()
         if archive_format == "tar.gz":
             asset = f"{name}-{{{{ version }}}}.tar.gz"
             bin_path = "bin/" + name
+            entries = {bin_path: (script_bytes, 0o755)} | {
+                path: (text.encode(), 0o644) for path, text in (files or {}).items()
+            }
             with tarfile.open(self.assets / f"{name}-{version}.tar.gz", "w:gz") as tar_file:
-                tar_info = tarfile.TarInfo(f"{name}-{version}/bin/{name}")
-                tar_info.size, tar_info.mode = len(script), 0o755
-                tar_file.addfile(tar_info, io.BytesIO(script))
+                for path, (data, mode) in entries.items():
+                    tar_info = tarfile.TarInfo(f"{name}-{version}/{path}")
+                    tar_info.size, tar_info.mode = len(data), mode
+                    tar_file.addfile(tar_info, io.BytesIO(data))
         elif archive_format == "zip":
             asset = f"{name}-{{{{ version }}}}.zip"
             bin_path = name
@@ -109,12 +121,14 @@ class Env:
                 zip_file.writestr(zipfile.ZipInfo("docs/"), b"")
                 zip_info = zipfile.ZipInfo(name)
                 zip_info.external_attr = 0o755 << 16
-                zip_file.writestr(zip_info, script)
+                zip_file.writestr(zip_info, script_bytes)
         else:
             asset = f"{name}-{{{{ version }}}}-linux"
             bin_path = "{{ asset }}"
-            (self.assets / f"{name}-{version}-linux").write_bytes(script)
-        lines = [f"deps = {json.dumps(list(deps))}", f'bin = {{ {name} = "{bin_path}" }}']
+            (self.assets / f"{name}-{version}-linux").write_bytes(script_bytes)
+        lines = [f"deps = {json.dumps(list(deps))}", *spec]
+        if bin_entry:
+            lines.append(f'bin = {{ {name} = "{bin_path}" }}')
         # TOML literal strings, so the shell commands need no escaping
         if post_install:
             lines.append(f"post_install = '{post_install}'")
@@ -194,11 +208,95 @@ def test_install_unpacks_archive_formats(env: Env, archive_format: ArchiveFormat
     assert env.run_bin("tool") == "tool 1.0"
 
 
+def test_man_pages_and_completions(env: Env) -> None:
+    env.add_package(
+        "tool",
+        files={
+            "tool.1": ".TH TOOL 1\n",
+            "comp/tool.zsh": "#compdef tool\n",
+            "comp/tool.bash": "complete -F _tool tool\n",
+            "comp/tool.fish": "complete -c tool\n",
+        },
+        spec=(
+            'man = ["tool.1"]',
+            (
+                "completions.tool = "
+                '{ zsh = "comp/tool.zsh", bash = "comp/tool.bash", fish = "comp/tool.fish" }'
+            ),
+        ),
+    )
+    env.pmg("install", "tool")
+    # installed under the names each shell looks for
+    installed = [
+        env.data / "man" / "man1" / "tool.1",
+        env.data / "zsh" / "site-functions" / "_tool",
+        env.data / "bash-completion" / "completions" / "tool",
+        env.data / "fish" / "vendor_completions.d" / "tool.fish",
+    ]
+    assert all(path.is_file() for path in installed)
+    env.pmg("uninstall", "tool")
+    assert not any(path.exists() for path in installed)
+
+
+def test_generated_completion_runs_staged_command(env: Env) -> None:
+    env.add_package("tool", spec=('completions.tool = { zsh = { cmd = "tool" } }',))
+    env.pmg("install", "tool")
+    assert (env.data / "zsh" / "site-functions" / "_tool").read_text() == "tool 1.0\n"
+
+
+def test_content_becomes_package_dir_with_links(env: Env) -> None:
+    # like zig, the command finds its files relative to its real path, so bin gets a symlink
+    env.add_package(
+        "tool",
+        script='#!/bin/sh\ncat "$(dirname "$(realpath "$0")")/../lib/data.txt"\n',
+        files={"lib/data.txt": "from lib"},
+        spec=(
+            "content = true",
+            'dir = "{{ data }}/tool-root"',
+            'links = { tool = "{{ dir }}/bin/tool" }',
+        ),
+        bin_entry=False,
+    )
+    env.pmg("install", "tool")
+    assert env.run_bin("tool") == "from lib"
+    env.pmg("uninstall", "tool")
+    assert not (env.data / "tool-root").exists()
+    assert list(env.bin.iterdir()) == []
+
+
+def test_extra_dirs_are_owned(env: Env) -> None:
+    env.add_package(
+        "tool",
+        spec=('dirs = { cache = "{{ data }}/tool-cache" }',),
+        post_install='echo state > "$PREFIX/dirs/cache/state"',
+    )
+    env.pmg("install", "tool")
+    assert (env.data / "tool-cache" / "state").read_text() == "state\n"
+    # the package dir stays absent, as nothing was put into it
+    assert not (env.data / "tool").exists()
+    env.pmg("uninstall", "tool")
+    assert not (env.data / "tool-cache").exists()
+
+
+def test_install_refuses_foreign_package_dir(env: Env) -> None:
+    env.add_package("tool", spec=("content = true",))
+    (env.data / "tool").mkdir(parents=True)
+    assert "exists and does not belong to tool" in env.pmg("install", "tool", ok=False).stderr
+    assert not (env.bin / "tool").exists()
+
+
 def test_command_release_sets_the_version(env: Env) -> None:
     env.add_package("tool", version="2.5", release='type = "command"\ncmd = "echo v2.5"')
     env.pmg("install", "tool")
     assert env.run_bin("tool") == "tool 2.5"
     assert env.installed() == {"tool": "v2.5 explicit"}
+
+
+def test_release_command_without_output_fails(env: Env) -> None:
+    # like a pipeline whose curl is missing, but whose last command succeeds
+    env.add_package("tool", release='type = "command"\ncmd = "missing-command | cat"')
+    assert "printed no tag" in env.pmg("install", "tool", ok=False).stderr
+    assert env.installed() == {}
 
 
 def test_old_glibc_gets_musl_asset(env: Env) -> None:
@@ -334,10 +432,20 @@ def test_dependency_cycle(env: Env) -> None:
 
 
 @pytest.mark.skipif(os.getenv("PMG_OFFLINE") == "1", reason="PMG_OFFLINE=1")
-def test_install_bat_from_github(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("name", "args", "extra_files"),
+    [
+        ("bat", ["--version"], ["man/man1/bat.1", "zsh/site-functions/_bat"]),
+        # zig only runs if it finds its lib dir through the symlink
+        ("zig", ["version"], ["zig/lib"]),
+    ],
+)
+def test_install_from_fixture_spec(
+    tmp_path: Path, name: str, args: list[str], extra_files: list[str]
+) -> None:
     env = clean_environ(tmp_path)
     env["PMG_SPECS_DIR"] = str(FIXTURE_SPECS)
-    subprocess.check_call([sys.executable, "-m", "pmg", "install", "bat"], env=env)
-    bat = tmp_path / ".local" / "bin" / "bat"
-    version = subprocess.check_output([bat, "--version"], text=True)  # noqa: S603
-    assert version.startswith("bat ")
+    subprocess.check_call([sys.executable, "-m", "pmg", "install", name], env=env)  # noqa: S603
+    subprocess.check_call([tmp_path / ".local" / "bin" / name, *args])  # noqa: S603
+    data = tmp_path / ".local" / "share"
+    assert all((data / path).exists() for path in extra_files)

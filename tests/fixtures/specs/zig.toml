@@ -1,8 +1,7 @@
 # zig finds its lib dir relative to the real path of its binary, so bin gets a symlink
-dirs = { zig = "{{ data }}/zig" }
-content = "zig"
-links = { zig = "{{ dirs.zig }}/zig" }
-check = { cmd = ["{{ bin }}/zig", "version"] }
+content = true
+links = { zig = "{{ dir }}/zig" }
+check = { args = ["version"] }
 
 [external]
 brew = "zig"
