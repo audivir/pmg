@@ -20,6 +20,7 @@ def main() -> None:
         print_completion,
         print_env,
         print_schema,
+        print_version,
         search,
         uninstall,
         update,
@@ -28,16 +29,20 @@ def main() -> None:
         validate,
     )
 
-    # reduce completions time
     if "_PMG_COMPLETE" in os.environ:
         import doctyper._completion_classes
+        from doctyper._completion_classes import completion_init
 
+        # the completion classes of the shells, which only the --install-completion option of
+        # add_completion would register; pmg prints and writes its completion itself
+        completion_init()
+        # reduce completions time
         doctyper._completion_classes._sanitize_help_text = lambda text: text  # noqa: SLF001
 
     logging.basicConfig(format="%(message)s")
     logger.setLevel(logging.INFO)
 
-    app = doctyper.DocTyper(help=__doc__, add_completion=True)
+    app = doctyper.DocTyper(help=__doc__)
     app.command()(install)
     app.command()(uninstall)
     app.command()(autoremove)
@@ -50,6 +55,7 @@ def main() -> None:
     app.command()(search)
     app.command("list")(list_installed)
     app.command("completion")(print_completion)
+    app.command("version")(print_version)
     app.command()(validate)
     # completions call the program pmg, also when started as python -m pmg
     app(prog_name="pmg")
