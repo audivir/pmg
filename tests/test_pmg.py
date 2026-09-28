@@ -27,6 +27,7 @@ import msgspec
 import pytest
 import zstandard
 
+import pmg.core
 from pmg.core import detect_platform
 
 if TYPE_CHECKING:
@@ -775,6 +776,17 @@ def test_completions(env: Env) -> None:
 def test_external_names(env: Env) -> None:
     env.add_package("tool", external=('brew = "tool-brew"', 'apt = "tool-apt"'))
     assert env.pmg("external", "tool").stdout == "brew tool-brew\napt tool-apt\n"
+
+
+def test_spec_commands_get_certificates_without_system_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import certifi
+
+    monkeypatch.setenv("PMG_HOME", str(tmp_path))
+    monkeypatch.setattr(pmg.core, "system_certificates", lambda: False)
+    output = pmg.core.run_shell("tool", "post_install", 'echo "$CURL_CA_BUNDLE $SSL_CERT_FILE"')
+    assert output.split() == [certifi.where(), certifi.where()]
 
 
 def test_search(env: Env) -> None:
