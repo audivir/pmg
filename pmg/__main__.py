@@ -13,7 +13,9 @@ if __name__ == "__main__":
         list_installed,
         logger,
         print_env,
+        print_schema,
         uninstall,
+        update,
         upgrade,
         use,
     )
@@ -27,6 +29,8 @@ if __name__ == "__main__":
     app.command()(autoremove)
     app.command()(use)
     app.command()(upgrade)
+    app.command()(update)
+    app.command("schema")(print_schema)
     app.command("env")(print_env)
     app.command("list")(list_installed)
     app()

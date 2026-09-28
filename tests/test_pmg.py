@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Literal, TypeAlias, override
 import pytest
 import zstandard
 
-from pmg.core import decode, detect_platform
+from pmg.core import detect_platform
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 ArchiveFormat: TypeAlias = Literal["tar.gz", "tar.zst", "zip", "bare"]
 
 FIXTURE_SPECS = Path(__file__).parent / "fixtures" / "specs"
-SHIPPED_SPECS = Path(__file__).parents[1] / "pmg" / "specs"
+LINUX = ("glibc_x64", "glibc_arm64", "musl_x64", "musl_arm64")
 PLATFORMS = ("glibc_x64", "glibc_arm64", "musl_x64", "musl_arm64", "macos_arm64")
 LIBC = ctypes.util.find_library("c") or "libc.so.6"
 
@@ -221,6 +221,7 @@ class Env:
             "PMG_ALPINE_MIRROR": f"{self.base_url}/alpine",
             "PMG_CONDA_API": f"{self.base_url}/conda-api",
             "PMG_CONDA_URL": f"{self.base_url}/conda",
+            "PMG_REGISTRY_URL": f"{self.base_url}/registry.tar.gz",
         }
         if specs_dir:
             env["PMG_SPECS_DIR"] = str(self.specs)
@@ -709,6 +710,38 @@ def test_upgrade_in_place_and_external(env: Env) -> None:
     }
 
 
+def write_registry(env: Env, version: str) -> None:
+    spec = STATIC_TOOL_SPEC.format(
+        fields="""post_install = 'cp "{{ spec_dir }}/tool/script" "$PREFIX/bin/tool"'""",
+        download='type = "url"\nurl = "' + env.base_url + '/{{ asset }}"',
+    ).replace('tag = "v1.0"', f'tag = "v{version}"')
+    spec += "".join(f'{platform} = "script-{{{{ version }}}}"\n' for platform in PLATFORMS)
+    (env.assets / f"script-{version}").write_text("")
+    script = f"#!/bin/sh\necho registry {version}\n".encode()
+    entries = {
+        "pmg-specs-main/specs/tool.toml": (spec.encode(), 0o644),
+        # files a spec needs go into a dir named like it
+        "pmg-specs-main/specs/tool/script": (script, 0o755),
+    }
+    (env.assets / "registry.tar.gz").write_bytes(gzip.compress(tar_bytes(entries)))
+
+
+def test_registry(env: Env) -> None:
+    write_registry(env, "1.0")
+    # the first install downloads the registry
+    env.pmg("install", "tool", specs_dir=False)
+    assert env.run_bin("tool") == "registry 1.0"
+    write_registry(env, "2.0")
+    assert "updated the specs" in env.pmg("update").stderr
+    env.pmg("upgrade", specs_dir=False)
+    assert env.run_bin("tool") == "registry 2.0"
+
+
+def test_schema(env: Env) -> None:
+    schema = json.loads(env.pmg("schema").stdout)
+    assert set(schema["$defs"]["Package"]["required"]) == {"release", "download", "external"}
+
+
 def test_content_subdir_with_keep_and_remove(env: Env) -> None:
     env.add_package(
         "tool",
@@ -898,21 +931,30 @@ channel = "cf"
     assert (root / "loader").read_text() == "libc"
 
 
-def for_host(name: str) -> pytest.MarkDecorator:
-    platforms = decode((SHIPPED_SPECS / f"{name}.toml").read_text()).platforms
+def registry_spec(host_platforms: tuple[str, ...]) -> pytest.MarkDecorator:
     host = detect_platform(None)
-    return pytest.mark.skipif(host not in platforms, reason=f"{name} is not for {host}")
+    return pytest.mark.skipif(host not in host_platforms, reason=f"not for {host}")
 
 
 @pytest.mark.skipif(os.getenv("PMG_OFFLINE") == "1", reason="PMG_OFFLINE=1")
 @pytest.mark.parametrize(
-    "name", [pytest.param(name, marks=for_host(name)) for name in ("patchelf", "musl")]
+    "name",
+    [
+        pytest.param("patchelf", marks=registry_spec(LINUX)),
+        pytest.param("musl", marks=registry_spec(("glibc_x64", "glibc_arm64"))),
+        "zig",
+    ],
 )
-def test_install_shipped_spec(tmp_path: Path, name: str) -> None:
+def test_install_from_registry(tmp_path: Path, name: str) -> None:
     subprocess.check_call(  # noqa: S603
         [sys.executable, "-m", "pmg", "install", name], env=clean_environ(tmp_path)
     )
-    expected = {"patchelf": "bin/patchelf", "musl": "share/musl@*/lib/ld-musl-*.so.1"}[name]
+    expected = {
+        "patchelf": "bin/patchelf",
+        "musl": "share/musl@*/lib/ld-musl-*.so.1",
+        # zig only runs if it finds its lib dir through the symlink
+        "zig": "share/zig@*/lib",
+    }[name]
     assert list((tmp_path / ".local").glob(expected))
 
 
@@ -921,8 +963,6 @@ def test_install_shipped_spec(tmp_path: Path, name: str) -> None:
     ("name", "args", "extra_files"),
     [
         ("bat", ["--version"], ["man/man1/bat.1", "zsh/site-functions/_bat"]),
-        # zig only runs if it finds its lib dir through the symlink
-        ("zig", ["version"], ["zig@*/lib"]),
     ],
 )
 def test_install_from_fixture_spec(

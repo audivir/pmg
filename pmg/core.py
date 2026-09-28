@@ -1,7 +1,8 @@
 """Resolving, installing, and uninstalling packages from their specs.
 
 Package specs are TOML files named after the package, searched in `$PMG_SPECS_DIR`, then in
-`$PMG_HOME/specs`, then in the specs shipped with pmg. Templates in a spec are Jinja templates with
+`$PMG_HOME/specs`, then in the registry, which `pmg update` downloads from the audivir/pmg-specs
+repo. Templates in a spec are Jinja templates with
 {{ tag }} (the release tag, e.g. "v0.26.1"), {{ version }} (the tag without a leading "v"),
 {{ arch }} (the machine as `uname -m` prints it), {{ data }} (`$XDG_DATA_HOME`), {{ bin }} (the bin
 dir), {{ dir }} (the package dir), {{ dirs.<key> }} (the extra dirs of the package), and, for
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     from _typeshed import StrPath
 
 GH_TOKEN_ENV = "PMG_GH_TOKEN"  # noqa: S105
+REGISTRY_URL = "https://github.com/audivir/pmg-specs/archive/refs/heads/main.tar.gz"
 HOST_PLATFORMS: dict[tuple[str, str], Platform] = {
     ("glibc", "x86_64"): "glibc_x64",
     ("glibc", "aarch64"): "glibc_arm64",
@@ -124,9 +126,14 @@ def pmg_home() -> Path:
     return data_home() / "pmg"
 
 
+def registry_dir() -> Path:
+    """Returns the dir of the specs downloaded by `pmg update`."""
+    return pmg_home() / "registry"
+
+
 def spec_dirs() -> list[Path]:
     """Returns the directories searched for specs, in order."""
-    dirs = [pmg_home() / "specs", Path(__file__).parent / "specs"]
+    dirs = [pmg_home() / "specs", registry_dir() / "specs"]
     if specs := os.getenv("PMG_SPECS_DIR"):
         dirs.insert(0, Path(specs))
     return dirs
@@ -195,6 +202,10 @@ def load_spec(name: str) -> Package:
         PmgError: If the spec is missing or invalid.
     """
     path = available_specs().get(name)
+    # the first use of pmg downloads the registry
+    if path is None and not registry_dir().exists():
+        update_registry()
+        path = available_specs().get(name)
     if path is None:  # pragma: no cover
         dirs = ", ".join(str(directory) for directory in spec_dirs())
         raise PmgError(f"no spec for {name} in {dirs}")
@@ -202,6 +213,20 @@ def load_spec(name: str) -> Package:
         return decode(path.read_text())
     except msgspec.ValidationError as e:  # pragma: no cover
         raise PmgError(f"invalid spec {path}: {e}") from e
+
+
+def update_registry() -> None:
+    """Replaces the registry with the specs of its repo, from `PMG_REGISTRY_URL`."""
+    url = os.getenv("PMG_REGISTRY_URL") or REGISTRY_URL
+    home = pmg_home()
+    home.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=home) as tmp:
+        archive = download_file(url, Path(tmp) / "registry.tar.gz")
+        unpack(archive, Path(tmp) / "unpacked")
+        if registry_dir().exists():
+            registry_dir().rename(Path(tmp) / "old")
+        strip_single_dir(Path(tmp) / "unpacked").rename(registry_dir())
+    logger.info("updated the specs from %s", url)
 
 
 def record_path(key: str) -> Path:
@@ -1277,6 +1302,17 @@ def print_env() -> None:
         paths += [render(path, context) for path in pkg.paths]
     if paths:
         print(f'export PATH={shlex.quote(os.pathsep.join(paths))}:"$PATH"')  # noqa: T201
+
+
+def update() -> None:
+    """Updates the specs from their repo."""
+    with exit_on_error():
+        update_registry()
+
+
+def print_schema() -> None:
+    """Prints the JSON schema of specs, e.g. for editors."""
+    print(msgspec.json.format(msgspec.json.encode(msgspec.json.schema(Package))).decode())  # noqa: T201
 
 
 def use(name: str) -> None:

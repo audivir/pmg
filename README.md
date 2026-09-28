@@ -92,8 +92,12 @@ Packages share this layout:
 bash and fish find the completions on their own. zsh needs the directory in `fpath`, and mandoc
 (Alpine) needs `MANPATH="$XDG_DATA_HOME/man:"`.
 
-Specs are searched in `$PMG_SPECS_DIR`, then in `$PMG_HOME/specs`, then in the specs shipped with
-pmg. `PMG_HOME` defaults to `$XDG_DATA_HOME/pmg` and also holds the install records.
+Specs are searched in `$PMG_SPECS_DIR`, then in `$PMG_HOME/specs`, then in the registry. `pmg update`
+downloads the registry from [pmg-specs](https://github.com/audivir/pmg-specs) (or
+`$PMG_REGISTRY_URL`), the first install does so on its own. `PMG_HOME` defaults to
+`$XDG_DATA_HOME/pmg` and also holds the install records. `pmg schema` prints the JSON schema of
+specs, which a first line like `#:schema https://raw.githubusercontent.com/audivir/pmg-specs/main/schema.json`
+hands to editors and `taplo check`.
 
 ```bash
 python -m pmg install bat
@@ -101,6 +105,7 @@ python -m pmg install bat@v0.25.0
 python -m pmg use bat@v0.25.0
 python -m pmg list
 python -m pmg uninstall bat@v0.25.0
+python -m pmg update
 python -m pmg upgrade
 python -m pmg autoremove
 eval "$(python -m pmg env)"
@@ -130,8 +135,8 @@ eval "$(python -m pmg env)"
   anaconda.org API, and the conda download server. Their indexes are cached for an hour in
   `$XDG_CACHE_HOME/pmg`.
 
-pmg ships specs for `glibc` (for running glibc programs on musl hosts), `musl` (the reverse),
-`musl-libs` (libstdc++ and libgcc_s for musl hosts), and `patchelf`.
+The registry has specs for common tools and for `glibc` (for running glibc programs on musl hosts),
+`musl` (the reverse), `musl-libs` (libstdc++ and libgcc_s for musl hosts), and `patchelf`.
 
 ## License
 
