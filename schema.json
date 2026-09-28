@@ -1,0 +1,666 @@
+{
+  "$ref": "#/$defs/Package",
+  "$defs": {
+    "Package": {
+      "title": "Package",
+      "description": "Stores the spec of a package.",
+      "type": "object",
+      "properties": {
+        "release": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitHubRelease"
+            },
+            {
+              "$ref": "#/$defs/CommandRelease"
+            },
+            {
+              "$ref": "#/$defs/StaticRelease"
+            },
+            {
+              "$ref": "#/$defs/ApkRelease"
+            },
+            {
+              "$ref": "#/$defs/CondaRelease"
+            }
+          ],
+          "discriminator": {
+            "propertyName": "type",
+            "mapping": {
+              "github": "#/$defs/GitHubRelease",
+              "command": "#/$defs/CommandRelease",
+              "static": "#/$defs/StaticRelease",
+              "apk": "#/$defs/ApkRelease",
+              "conda": "#/$defs/CondaRelease"
+            }
+          }
+        },
+        "download": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GitHubDownload"
+            },
+            {
+              "$ref": "#/$defs/UrlDownload"
+            },
+            {
+              "$ref": "#/$defs/CommandDownload"
+            },
+            {
+              "$ref": "#/$defs/ApkDownload"
+            },
+            {
+              "$ref": "#/$defs/CondaDownload"
+            }
+          ],
+          "discriminator": {
+            "propertyName": "type",
+            "mapping": {
+              "github": "#/$defs/GitHubDownload",
+              "url": "#/$defs/UrlDownload",
+              "command": "#/$defs/CommandDownload",
+              "apk": "#/$defs/ApkDownload",
+              "conda": "#/$defs/CondaDownload"
+            }
+          }
+        },
+        "deps": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "platforms": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "glibc_arm64",
+              "glibc_x64",
+              "macos_arm64",
+              "musl_arm64",
+              "musl_x64"
+            ]
+          },
+          "default": []
+        },
+        "platform_deps": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": {}
+        },
+        "external": {
+          "$ref": "#/$defs/External"
+        },
+        "min_glibc": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "assets": {
+          "$ref": "#/$defs/Assets",
+          "default": {}
+        },
+        "dir": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dirs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string"
+            }
+          ],
+          "default": false
+        },
+        "keep": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "bin": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "links": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "man": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "completions": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/Completions"
+          },
+          "default": {}
+        },
+        "check": {
+          "anyOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/Check"
+            }
+          ],
+          "default": null
+        },
+        "post_install": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "uninstall": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "upgrade": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        }
+      },
+      "required": [
+        "release",
+        "download",
+        "external"
+      ],
+      "additionalProperties": false
+    },
+    "GitHubRelease": {
+      "title": "GitHubRelease",
+      "description": "Stores the GitHub repo whose latest release is the latest version.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "github"
+          ]
+        },
+        "repo": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "repo"
+      ],
+      "additionalProperties": false
+    },
+    "CommandRelease": {
+      "title": "CommandRelease",
+      "description": "Stores a shell command printing the latest tag.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "command"
+          ]
+        },
+        "cmd": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "cmd"
+      ],
+      "additionalProperties": false
+    },
+    "StaticRelease": {
+      "title": "StaticRelease",
+      "description": "Stores a fixed tag.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "static"
+          ]
+        },
+        "tag": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "tag"
+      ],
+      "additionalProperties": false
+    },
+    "ApkRelease": {
+      "title": "ApkRelease",
+      "description": "Stores the Alpine package whose version in the main repo is the latest version.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "apk"
+          ]
+        },
+        "package": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "package"
+      ],
+      "additionalProperties": false
+    },
+    "CondaRelease": {
+      "title": "CondaRelease",
+      "description": "Stores the conda channel whose newest build of the asset package is the latest version.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "conda"
+          ]
+        },
+        "channel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "channel"
+      ],
+      "additionalProperties": false
+    },
+    "GitHubDownload": {
+      "title": "GitHubDownload",
+      "description": "Stores the GitHub repo whose release assets are downloaded.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "github"
+          ]
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false
+    },
+    "UrlDownload": {
+      "title": "UrlDownload",
+      "description": "Stores the URL template of the download.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "url"
+          ]
+        },
+        "url": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "url"
+      ],
+      "additionalProperties": false
+    },
+    "CommandDownload": {
+      "title": "CommandDownload",
+      "description": "Stores the shell command of an installer like the one of rustup.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "command"
+          ]
+        },
+        "cmd": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "cmd"
+      ],
+      "additionalProperties": false
+    },
+    "ApkDownload": {
+      "title": "ApkDownload",
+      "description": "Stores the Alpine packages unpacked together into the package dir.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "apk"
+          ]
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "type",
+        "packages"
+      ],
+      "additionalProperties": false
+    },
+    "CondaDownload": {
+      "title": "CondaDownload",
+      "description": "Stores the conda channel of the asset package.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "enum": [
+            "conda"
+          ]
+        },
+        "channel": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "channel"
+      ],
+      "additionalProperties": false
+    },
+    "External": {
+      "title": "External",
+      "description": "Stores the package names in system package managers.",
+      "type": "object",
+      "properties": {
+        "brew": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "apt": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "apk": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dnf": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "yum": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "Assets": {
+      "title": "Assets",
+      "description": "Stores the asset file name for each platform; a missing platform is unsupported.",
+      "type": "object",
+      "properties": {
+        "glibc_arm64": {
+          "type": "string"
+        },
+        "glibc_x64": {
+          "type": "string"
+        },
+        "macos_arm64": {
+          "type": "string"
+        },
+        "musl_arm64": {
+          "type": "string"
+        },
+        "musl_x64": {
+          "type": "string"
+        }
+      },
+      "required": []
+    },
+    "Completions": {
+      "title": "Completions",
+      "description": "Stores the completion script of a command for each shell, as archive path or command.",
+      "type": "object",
+      "properties": {
+        "zsh": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/GeneratedCompletion"
+            }
+          ],
+          "default": null
+        },
+        "bash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/GeneratedCompletion"
+            }
+          ],
+          "default": null
+        },
+        "fish": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/GeneratedCompletion"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "GeneratedCompletion": {
+      "title": "GeneratedCompletion",
+      "description": "Stores the shell command printing a completion script, run with the staged bin in PATH.",
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cmd"
+      ],
+      "additionalProperties": false
+    },
+    "Check": {
+      "title": "Check",
+      "description": "Stores how to detect a copy of the package that pmg did not install.",
+      "type": "object",
+      "properties": {
+        "files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "libs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "cmd": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "args": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "regex": {
+          "type": "string",
+          "default": "\\d+(?:\\.\\d+)+"
+        },
+        "dev_tool": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  }
+}

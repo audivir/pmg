@@ -81,6 +81,14 @@ HOST_PLATFORMS: dict[tuple[str, str], Platform] = {
     ("macos", "arm64"): "macos_arm64",
 }
 """Platform for each libc and machine, as reported by `platform.machine`."""
+ZSH_COMPLETION = """#compdef pmg
+# asks pmg for the completions, like `_PMG_COMPLETE=source_zsh pmg` prints, but autoloadable
+local completions
+completions="$(env _TYPER_COMPLETE_ARGS="${words[1,$CURRENT]}" _PMG_COMPLETE=complete_zsh pmg)"
+# pmg falls back to completing files without a match, but only packages make sense
+[[ "$completions" == _files ]] || eval "$completions"
+"""
+"""zsh completion of pmg, as an autoloadable function."""
 COMPLETION_NAMES = {"zsh": "_{}", "bash": "{}", "fish": "{}.fish"}
 """File name of the completion script of a command for each shell."""
 CACHE_SECONDS = 3600
@@ -1245,7 +1253,7 @@ def exit_on_error() -> Generator[None]:
         logger.error("error: %s", e)  # noqa: TRY400
         raise SystemExit(1) from e
     finally:
-        write_env_file()
+        write_shell_files()
 
 
 def needs_installing(
@@ -1352,13 +1360,24 @@ def env_code() -> str:
     return "".join(f"{line}\n" for line in lines)
 
 
-def write_env_file() -> None:
-    """Writes the code of `pmg env` to `$PMG_HOME/env.sh`, for shells to source without pmg."""
-    path = pmg_home() / "env.sh"
+def write_file(path: Path, text: str) -> None:
+    """Writes a file atomically, creating its dir."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".sh.tmp")
-    tmp_path.write_text(env_code())
+    tmp_path = path.with_name(f"{path.name}.tmp")
+    tmp_path.write_text(text)
     tmp_path.replace(path)
+
+
+def write_shell_files() -> None:
+    """Writes the code of `pmg env` to `$PMG_HOME/env.sh` and the zsh completion of pmg.
+
+    Shells source the env file instead of running pmg; the completion goes to the completions of
+    the packages, so it needs no setup of its own.
+    """
+    write_file(pmg_home() / "env.sh", env_code())
+    completion = layout()["zsh"] / "_pmg"
+    if not completion.is_file() or completion.read_text() != ZSH_COMPLETION:
+        write_file(completion, ZSH_COMPLETION)
 
 
 def print_env() -> None:
@@ -1385,8 +1404,31 @@ def update() -> None:
 
 
 def print_schema() -> None:
-    """Prints the JSON schema of specs, e.g. for editors."""
+    """Prints the JSON schema of specs, which the `schema.json` of this repo keeps for editors."""
     print(msgspec.json.format(msgspec.json.encode(msgspec.json.schema(Package))).decode())  # noqa: T201
+
+
+def print_completion() -> None:
+    """Prints the zsh completion of pmg, which pmg also writes next to the other completions."""
+    print(ZSH_COMPLETION, end="")  # noqa: T201
+
+
+def validate(paths: Annotated[list[Path], doctyper.Argument()]) -> None:
+    """Checks spec files against the models of pmg, e.g. in the CI of a spec repo.
+
+    Args:
+        paths: Spec files to check.
+    """
+    invalid = 0
+    for path in paths:
+        try:
+            decode(path.read_text())
+        except msgspec.ValidationError as e:
+            logger.error("%s: %s", path, e)  # noqa: TRY400
+            invalid += 1
+    if invalid:
+        raise SystemExit(1)
+    logger.info("%d specs are valid", len(paths))
 
 
 def use(name: Annotated[str, doctyper.Argument(autocompletion=complete_installed)]) -> None:

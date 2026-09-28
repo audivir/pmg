@@ -755,6 +755,9 @@ def test_completions(env: Env) -> None:
         }
         return subprocess.check_output([sys.executable, "-m", "pmg"], env=env_vars, text=True)
 
+    # pmg writes its completion next to those of its packages, so zsh finds it there
+    completion = env.data / "zsh" / "site-functions" / "_pmg"
+    assert completion.read_text() == env.pmg("completion").stdout
     # install completes the specs, uninstall the installed packages and their versions
     assert '"other"' in complete("pmg install ot")
     # a missing registry is downloaded for it
@@ -774,9 +777,20 @@ def test_external_names(env: Env) -> None:
     assert env.pmg("external", "tool").stdout == "brew tool-brew\napt tool-apt\n"
 
 
-def test_schema(env: Env) -> None:
-    schema = json.loads(env.pmg("schema").stdout)
-    assert set(schema["$defs"]["Package"]["required"]) == {"release", "download", "external"}
+def test_schema_file_is_current(env: Env) -> None:
+    # spec repos and editors use the committed schema.json, which must follow the models
+    committed = json.loads((Path(__file__).parents[1] / "schema.json").read_text())
+    assert json.loads(env.pmg("schema").stdout) == committed
+
+
+def test_validate(env: Env) -> None:
+    (env.root / "bad.toml").write_text('binn = { tool = "tool" }\n')
+    stderr = env.pmg(
+        "validate", str(FIXTURE_SPECS / "bat.toml"), str(env.root / "bad.toml"), ok=False
+    ).stderr
+    assert "bad.toml" in stderr
+    assert "binn" in stderr
+    assert "1 specs are valid" in env.pmg("validate", str(FIXTURE_SPECS / "bat.toml")).stderr
 
 
 def test_content_subdir_with_keep_and_remove(env: Env) -> None:

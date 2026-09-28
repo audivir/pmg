@@ -15,12 +15,14 @@ def main() -> None:
         install,
         list_installed,
         logger,
+        print_completion,
         print_env,
         print_schema,
         uninstall,
         update,
         upgrade,
         use,
+        validate,
     )
 
     # info for pmg only, as httpx logs every request at info.
@@ -37,6 +39,8 @@ def main() -> None:
     app.command("env")(print_env)
     app.command()(external)
     app.command("list")(list_installed)
+    app.command("completion")(print_completion)
+    app.command()(validate)
     # completions call the program pmg, also when started as python -m pmg
     app(prog_name="pmg")
 

@@ -97,9 +97,11 @@ bash and fish find the completions on their own. zsh needs the directory in `fpa
 Specs are searched in `$PMG_SPECS_DIR`, then in `$PMG_HOME/specs`, then in the registry. `pmg update`
 downloads the registry from [pmg-specs](https://github.com/audivir/pmg-specs) (or
 `$PMG_REGISTRY_URL`), the first install does so on its own. `PMG_HOME` defaults to
-`$XDG_DATA_HOME/pmg` and also holds the install records. `pmg schema` prints the JSON schema of
-specs, which a first line like `#:schema https://raw.githubusercontent.com/audivir/pmg-specs/main/schema.json`
-hands to editors and `taplo check`.
+`$XDG_DATA_HOME/pmg` and also holds the install records.
+
+`schema.json` is the JSON schema of specs, which `pmg schema` prints and a test keeps current. A
+first line `#:schema https://raw.githubusercontent.com/audivir/pmg/main/schema.json` hands it to
+editors and `taplo check`. `pmg validate <spec>...` checks specs against the models of pmg itself.
 
 ```bash
 pmg install bat
@@ -137,8 +139,8 @@ eval "$(pmg env)"
 - `list` shows each installed version, whether it was installed directly or as a dependency, and
   whether it is active.
 - Set `PMG_GH_TOKEN` (or `GH_TOKEN`) to avoid the rate limit of the GitHub API.
-- `_PMG_COMPLETE=source_zsh pmg` prints the zsh completion script, which completes commands,
-  specs, and installed packages.
+- pmg writes its zsh completion to `$XDG_DATA_HOME/zsh/site-functions/_pmg`, next to those of the
+  packages, and `pmg completion` prints it. It completes commands, specs, and installed packages.
 - `PMG_ALPINE_MIRROR`, `PMG_CONDA_API`, and `PMG_CONDA_URL` replace the Alpine mirror, the
   anaconda.org API, and the conda download server. Their indexes are cached for an hour in
   `$XDG_CACHE_HOME/pmg`.
