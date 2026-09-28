@@ -304,6 +304,10 @@ def run_shell(
     Raises:
         PmgError: If the command fails.
     """
+    if cwd is None:
+        # not the current dir, where a spec dir holding uv.toml would configure uv
+        cwd = pmg_home()
+        cwd.mkdir(parents=True, exist_ok=True)
     # spec commands are shell commands by design.
     result = subprocess.run(  # noqa: S602
         f"set -euo pipefail\n{cmd}",
