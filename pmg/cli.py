@@ -187,20 +187,36 @@ def search(pattern: Annotated[str | None, doctyper.Argument()] = None) -> None:
     from pmg.core import search_specs
 
     with exit_on_error():
-        installed = {record.name for record in load_records().values()}
-        for name in sorted(search_specs(pattern)):
-            print(f"{name} installed" if name in installed else name)  # noqa: T201
+        tags: dict[str, list[str]] = {}
+        for record in load_records().values():
+            tags.setdefault(record.name, []).append(
+                f"{record.tag} (active)" if record.active else record.tag
+            )
+        rows = [[name, ", ".join(tags.get(name, []))] for name in sorted(search_specs(pattern))]
+        print_columns(rows)
 
 
 def list_installed() -> None:
-    """Lists the installed package versions."""
-    for key, record in load_records().items():
-        words = [key, "explicit" if record.explicit else "dependency"]
-        if record.active:
-            words.append("active")
-        if record.external:
-            words += ["external", record.external_version or "unknown"]
-        print(" ".join(words))  # noqa: T201
+    """Lists the installed package versions, with the version of external ones."""
+    print_columns(
+        [
+            [
+                key,
+                "explicit" if record.explicit else "dependency",
+                "active" if record.active else "",
+                (record.external_version or "unknown") if record.external else "",
+            ]
+            for key, record in load_records().items()
+        ]
+    )
+
+
+def print_columns(rows: list[list[str]]) -> None:
+    """Prints rows with their columns aligned, without trailing spaces."""
+    widths = [max(map(len, column)) for column in zip(*rows, strict=True)]
+    for row in rows:
+        cells = (cell.ljust(width) for cell, width in zip(row, widths, strict=True))
+        print("  ".join(cells).rstrip())  # noqa: T201
 
 
 def print_version() -> None:
