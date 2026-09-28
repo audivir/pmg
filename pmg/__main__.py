@@ -21,7 +21,7 @@ if __name__ == "__main__":
     # info for pmg only, as httpx logs every request at info.
     logging.basicConfig(format="%(message)s")
     logger.setLevel(logging.INFO)
-    app = doctyper.DocTyper()
+    app = doctyper.DocTyper(help=__doc__)
     app.command()(install)
     app.command()(uninstall)
     app.command()(autoremove)
