@@ -37,3 +37,21 @@ jobs:
           PMG_GH_TOKEN: ${{ github.token }}
       - run: uv run coverage combine || true
       - run: uv run coverage report
+  specs:
+    # the specs of pmg-specs against this pmg and its schema, which their own CI only checks on
+    # their pushes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
+        with:
+          repository: audivir/pmg-specs
+          path: pmg-specs
+      - uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: "3.13"
+      - run: uv sync
+      - run: uv run python -m pmg validate pmg-specs/specs/*.toml
+      - run: |
+          sed -i "s|^#:schema .*|#:schema file://$PWD/schema.json|" pmg-specs/specs/*.toml
+          uvx --from taplo taplo check pmg-specs/specs/*.toml
