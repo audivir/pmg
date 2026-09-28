@@ -777,6 +777,22 @@ def test_external_names(env: Env) -> None:
     assert env.pmg("external", "tool").stdout == "brew tool-brew\napt tool-apt\n"
 
 
+def test_search(env: Env) -> None:
+    # the registry has "tool", which a missing registry downloads for the search
+    write_registry(env, "1.0")
+    for name in ("zsh", "musl-libs", "Musl"):
+        env.add_package(name)
+    env.pmg("install", "zsh")
+    assert env.pmg("search").stdout == "Musl\nmusl-libs\ntool\nzsh installed\n"
+    # a part of the name, ignoring case
+    assert env.pmg("search", "MUSL").stdout == "Musl\nmusl-libs\n"
+    # a glob matches the whole name
+    assert env.pmg("search", "*-libs").stdout == "musl-libs\n"
+    assert env.pmg("search", "z?h").stdout == "zsh installed\n"
+    assert env.pmg("search", "sh").stdout == "zsh installed\n"
+    assert env.pmg("search", "s?").stdout == ""
+
+
 def test_schema_file_is_current(env: Env) -> None:
     # spec repos and editors use the committed schema.json, which must follow the models
     committed = json.loads((Path(__file__).parents[1] / "schema.json").read_text())

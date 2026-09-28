@@ -109,6 +109,24 @@ def available_specs() -> dict[str, Path]:
     return specs
 
 
+def search_specs(pattern: str | None) -> list[str]:
+    """Returns the names of the packages with a spec matching the pattern, ignoring case.
+
+    A pattern with `*`, `?`, or `[` is a glob matching the whole name, any other a part of it;
+    without a pattern, all names. The first use of pmg downloads the registry.
+    """
+    import fnmatch
+
+    if not registry_dir().exists():
+        update_registry()
+    if pattern is None:
+        return list(available_specs())
+    pattern = pattern.lower()
+    if any(char in pattern for char in "*?["):
+        return [name for name in available_specs() if fnmatch.fnmatchcase(name.lower(), pattern)]
+    return [name for name in available_specs() if pattern in name.lower()]
+
+
 def layout() -> dict[str, Path]:
     """Maps each top-level dir of the shared staging layout to its install location."""
     data = data_home()

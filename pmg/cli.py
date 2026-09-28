@@ -160,6 +160,20 @@ def external(name: Annotated[str, doctyper.Argument(autocompletion=complete_avai
                 print(f"{manager} {package}")  # noqa: T201
 
 
+def search(pattern: Annotated[str | None, doctyper.Argument()] = None) -> None:
+    """Lists the packages with a spec, marking the installed ones.
+
+    Args:
+        pattern: Part of the name, or a glob like "zs*" or "*-libs"; all packages if not given.
+    """
+    from pmg.core import search_specs
+
+    with exit_on_error():
+        installed = {record.name for record in load_records().values()}
+        for name in sorted(search_specs(pattern)):
+            print(f"{name} installed" if name in installed else name)  # noqa: T201
+
+
 def list_installed() -> None:
     """Lists the installed package versions."""
     for key, record in load_records().items():

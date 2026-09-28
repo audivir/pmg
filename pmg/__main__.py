@@ -20,6 +20,7 @@ def main() -> None:
         print_completion,
         print_env,
         print_schema,
+        search,
         uninstall,
         update,
         upgrade,
@@ -46,6 +47,7 @@ def main() -> None:
     app.command("schema")(print_schema)
     app.command("env")(print_env)
     app.command()(external)
+    app.command()(search)
     app.command("list")(list_installed)
     app.command("completion")(print_completion)
     app.command()(validate)
