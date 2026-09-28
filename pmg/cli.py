@@ -198,17 +198,14 @@ def search(pattern: Annotated[str | None, doctyper.Argument()] = None) -> None:
 
 def list_installed() -> None:
     """Lists the installed package versions, with the version of external ones."""
-    print_columns(
-        [
-            [
-                key,
-                "explicit" if record.explicit else "dependency",
-                "active" if record.active else "",
-                (record.external_version or "unknown") if record.external else "",
-            ]
-            for key, record in load_records().items()
-        ]
-    )
+    rows = []
+    for key, record in load_records().items():
+        # one column for both, as external versions are rarely active, which left a gap
+        state = ["active"] if record.active else []
+        if record.external:
+            state.append(f"external {record.external_version or 'unknown'}")
+        rows.append([key, "explicit" if record.explicit else "dependency", " ".join(state)])
+    print_columns(rows)
 
 
 def print_columns(rows: list[list[str]]) -> None:

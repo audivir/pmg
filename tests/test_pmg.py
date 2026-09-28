@@ -709,7 +709,7 @@ def test_upgrade_in_place_and_external(env: Env) -> None:
     assert (env.data / "tool@v1.0" / "marker").read_text() == "upgraded\n"
     # external versions are left to their package manager
     assert env.installed() == {
-        "other@external": "explicit 3.1",
+        "other@external": "explicit external 3.1",
         "tool@v1.0": "explicit active",
     }
 
@@ -916,7 +916,7 @@ def test_external_command(env: Env) -> None:
     env.pmg("install", "app")
     assert env.installed() == {
         "app@v1.0": "explicit active",
-        "tool@external": "dependency 3.1",
+        "tool@external": "dependency external 3.1",
     }
     assert not (env.bin / "tool").exists()
     # the external 3.1 is too new for old, so pmg installs its own tool
@@ -933,7 +933,7 @@ def test_external_package_found_by_name(env: Env) -> None:
     env.add_system_command("tool", "tool 2.0")
     env.add_package("tool", bin_entry=False)
     env.pmg("install", "tool")
-    assert env.installed() == {"tool@external": "explicit 2.0"}
+    assert env.installed() == {"tool@external": "explicit external 2.0"}
 
 
 def test_external_package_pulls_in_no_dependencies(env: Env) -> None:
@@ -941,7 +941,7 @@ def test_external_package_pulls_in_no_dependencies(env: Env) -> None:
     env.add_package("lib")
     env.add_package("app", deps=("lib",))
     env.pmg("install", "app")
-    assert env.installed() == {"app@external": "explicit 2.0"}
+    assert env.installed() == {"app@external": "explicit external 2.0"}
 
 
 @pytest.mark.parametrize(
@@ -956,7 +956,7 @@ def test_external_files_and_libs(env: Env, check: str, external: bool) -> None:
     env.add_system_command("marker", "")
     env.add_package("tool", check=check.replace("SYSTEM", str(env.system)))
     env.pmg("install", "tool")
-    expected = {"tool@external": "explicit unknown"}
+    expected = {"tool@external": "explicit external unknown"}
     assert env.installed() == (expected if external else {"tool@v1.0": "explicit active"})
 
 
