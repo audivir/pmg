@@ -161,7 +161,7 @@ class Package(BaseStruct, kw_only=True):
     """Oldest glibc for the glibc assets; older glibc hosts get the musl assets."""
     assets: Assets = {}
     dir: str | None = None
-    """Package dir, if not {{ data }}/<name>."""
+    """Package dir, if not $PMG_HOME/packages/<name>; @tag is appended either way."""
     dirs: dict[str, str] = {}
     """Extra dirs owned by the package, available as {{ dirs.<key> }}."""
     content: bool | str = False

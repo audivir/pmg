@@ -117,10 +117,11 @@ eval "$(pmg env)"
 
 - `install` installs the latest release. `name@tag` installs the release with that tag, written as
   the project writes it (`bat@v0.25.0`, `zig@0.15.1`).
-- Versions are installed side by side. Commands get `@tag` appended (`bat@v0.26.1`), and the package
-  directory is `$XDG_DATA_HOME/<name>@<tag>`. The plain names of the commands, man pages, and
-  completions link to the active version: the latest install, or a given tag if no other version
-  is active. `use` switches the active version.
+- Versions are installed side by side. The package directory is `$PMG_HOME/packages/<name>@<tag>`
+  (`~/.local/share/pmg/packages/bat@v0.26.1`), and the commands are `$PMG_HOME/bin/<cmd>@<tag>`.
+  The plain names of the commands in `~/.local/bin`, and of the man pages and completions, link to
+  the active version: the latest install, or a given tag if no other version is active. `use`
+  switches the active version.
 - `install` also installs the dependencies, listed in `deps` with optional version specifiers like
   `"lib>=1.2,<2"`. An installed version that meets them is enough, otherwise the latest release is
   installed. The version of a tag is its first number, e.g. `1.27.1` in `go1.27.1`.

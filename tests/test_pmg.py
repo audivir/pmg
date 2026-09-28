@@ -127,6 +127,10 @@ class Env(msgspec.Struct):
         return self.home / ".local" / "share"
 
     @property
+    def packages(self) -> Path:
+        return self.pmg_home / "packages"
+
+    @property
     def system(self) -> Path:
         return self.root / "system"
 
@@ -238,7 +242,9 @@ class Env(msgspec.Struct):
         return result
 
     def run_bin(self, name: str) -> str:
-        return subprocess.check_output([self.bin / name], text=True).strip()  # noqa: S603
+        # versions as cmd@tag are in the versions bin, the bin dir only has the plain names
+        path = self.pmg_home / "bin" / name if "@" in name else self.bin / name
+        return subprocess.check_output([path], text=True).strip()  # noqa: S603
 
     def installed(self) -> dict[str, str]:
         rows = (line.split() for line in self.pmg("list").stdout.splitlines())
@@ -331,7 +337,7 @@ def test_content_becomes_package_dir_with_links(env: Env) -> None:
     env.pmg("install", "tool")
     assert env.run_bin("tool") == "from lib"
     env.pmg("uninstall", "tool")
-    assert not (env.data / "tool-root@v1.0").exists()
+    assert not (env.packages / "tool-root@v1.0").exists()
     assert list(env.bin.iterdir()) == []
 
 
@@ -345,14 +351,14 @@ def test_extra_dirs_are_owned(env: Env) -> None:
     cache = env.data / f"tool-cache-{platform.machine()}"
     assert (cache / "state").read_text() == "state\n"
     # the package dir stays absent, as nothing was put into it
-    assert not (env.data / "tool@v1.0").exists()
+    assert not (env.packages / "tool@v1.0").exists()
     env.pmg("uninstall", "tool")
     assert not cache.exists()
 
 
 def test_install_refuses_foreign_package_dir(env: Env) -> None:
     env.add_package("tool", spec=("content = true",))
-    (env.data / "tool@v1.0").mkdir(parents=True)
+    (env.packages / "tool@v1.0").mkdir(parents=True)
     assert "exists and does not belong to tool" in env.pmg("install", "tool", ok=False).stderr
     assert not (env.bin / "tool").exists()
 
@@ -525,10 +531,12 @@ def test_failed_move_removes_files_moved_before(env: Env) -> None:
         "tool",
         post_install="cp bin/tool bin/a-copy && mkdir bin/sub && cp bin/tool bin/sub/b",
     )
-    env.bin.mkdir(parents=True)
-    (env.bin / "sub").write_text("mine")
+    commands = env.pmg_home / "bin"
+    commands.mkdir(parents=True)
+    (commands / "sub").write_text("mine")
     env.pmg("install", "tool", ok=False)
-    assert sorted(path.name for path in env.bin.iterdir()) == ["sub"]
+    assert sorted(path.name for path in commands.iterdir()) == ["sub"]
+    assert not env.bin.exists() or not any(env.bin.iterdir())
     assert env.installed() == {}
 
 
@@ -601,7 +609,7 @@ def test_command_download(env: Env) -> None:
     )
     env.pmg("install", "tool")
     assert env.run_bin("tool") == "from command"
-    assert (env.data / "tool@v1.0" / "bin" / "tool").exists()
+    assert (env.packages / "tool@v1.0" / "bin" / "tool").exists()
 
 
 def test_env_and_paths(env: Env) -> None:
@@ -617,7 +625,7 @@ def test_env_and_paths(env: Env) -> None:
         post_install='test "$TOOL_HOME" = "$PREFIX/dir"',
     )
     env.pmg("install", "tool")
-    package_dir = env.data / "tool@v1.0"
+    package_dir = env.packages / "tool@v1.0"
     output = env.pmg("env").stdout
     assert output == f'export TOOL_HOME={package_dir}\nexport PATH={package_dir}/bin:"$PATH"\n'
     # shells source this file instead of running pmg
@@ -646,7 +654,7 @@ def test_platform_deps(env: Env) -> None:
     )
     env.pmg("install", "app")
     assert set(env.installed()) == {"app@v1.0", "lib@v1.0"}
-    assert (env.data / "app@v1.0" / "info").read_text() == "v1.0 []\n"
+    assert (env.packages / "app@v1.0" / "info").read_text() == "v1.0 []\n"
 
 
 def test_markers_in_deps(env: Env) -> None:
@@ -669,9 +677,9 @@ def test_dependency_template_variables(env: Env, external: bool) -> None:
         post_install='echo "{{ deps.lib.dir }} {{ deps.lib.version }}" > "$PREFIX/dir/lib-info"',
     )
     env.pmg("install", "app")
-    info = (env.data / "app@v1.0" / "lib-info").read_text()
+    info = (env.packages / "app@v1.0" / "lib-info").read_text()
     # an external dependency has no package dir
-    assert info == (" 3.1\n" if external else f"{env.data / 'lib@v1.0'} v1.0\n")
+    assert info == (" 3.1\n" if external else f"{env.packages / 'lib@v1.0'} v1.0\n")
 
 
 def test_upgrade_replaces_active_version(env: Env) -> None:
@@ -706,7 +714,7 @@ def test_upgrade_in_place_and_external(env: Env) -> None:
     )
     env.pmg("install", "tool", "other")
     env.pmg("upgrade")
-    assert (env.data / "tool@v1.0" / "marker").read_text() == "upgraded\n"
+    assert (env.packages / "tool@v1.0" / "marker").read_text() == "upgraded\n"
     # external versions are left to their package manager
     assert env.installed() == {
         "other@external": "explicit external 3.1",
@@ -958,7 +966,7 @@ def test_content_subdir_with_keep_and_remove(env: Env) -> None:
         bin_entry=False,
     )
     env.pmg("install", "tool")
-    root = env.data / "tool@v1.0"
+    root = env.packages / "tool@v1.0"
     # the kept dir lib/deep keeps its content, the emptied doc dir goes
     assert sorted(str(path.relative_to(root)) for path in root.rglob("*")) == [
         "lib",
@@ -1062,7 +1070,7 @@ packages = ["tool", "toollib"]
     (repo / "APKINDEX.tar.gz").unlink()
     env.pmg("uninstall", "tool")
     env.pmg("install", "tool")
-    root = env.data / "tool@1.0-r0"
+    root = env.packages / "tool@1.0-r0"
     assert sorted(str(path.relative_to(root)) for path in root.rglob("*")) == [
         "usr",
         "usr/bin",
@@ -1124,7 +1132,7 @@ channel = "cf"
     (api / "files").unlink()
     env.pmg("uninstall", "sysroot")
     env.pmg("install", "sysroot")
-    root = env.data / "sysroot@2.28"
+    root = env.packages / "sysroot@2.28"
     assert sorted(str(path.relative_to(root)) for path in root.rglob("*")) == [
         "lib64",
         "lib64/libc.so.6",
@@ -1157,9 +1165,9 @@ def test_install_from_registry(tmp_path: Path, name: str) -> None:
     )
     expected = {
         "patchelf": "bin/patchelf",
-        "musl": "share/musl@*/lib/ld-musl-*.so.1",
+        "musl": "share/pmg/packages/musl@*/lib/ld-musl-*.so.1",
         # zig only runs if it finds its lib dir through the symlink
-        "zig": "share/zig@*/lib",
+        "zig": "share/pmg/packages/zig@*/lib",
     }[name]
     # a system copy, like patchelf on GitHub's runners, counts as external instead
     assert f"{name}@external " in listed or list((tmp_path / ".local").glob(expected))

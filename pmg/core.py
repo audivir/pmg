@@ -8,8 +8,10 @@ repo. Templates in a spec are Jinja templates with
 dir), {{ dir }} (the package dir), {{ dirs.<key> }} (the extra dirs of the package), and, for
 files, {{ asset }} (the asset name).
 
-Packages install their commands, man pages, and completions into the shared layout below `~/.local`
-and everything else into their own dirs below `$XDG_DATA_HOME`, which they own as a whole.
+Packages install everything else into their own dirs, `$PMG_HOME/packages/<name>@<tag>`, which
+they own as a whole. Their commands go to `$PMG_HOME/bin/<cmd>@<tag>`, and the plain names of the
+commands, man pages, and completions of the active version link into the shared layout below
+`~/.local`, so PATH has no versioned names.
 """
 
 from __future__ import annotations
@@ -186,6 +188,19 @@ def version_store(name: str, tag: str) -> Path:
     return pmg_home() / "share" / f"{name}@{tag}"
 
 
+def packages_dir() -> Path:
+    """Returns the dir of the package dirs, as name@tag, unless a spec sets its own `dir`."""
+    return pmg_home() / "packages"
+
+
+def versions_bin() -> Path:
+    """Returns the dir of the commands of all versions, as cmd@tag, which the bin dir links to.
+
+    Outside the bin dir, so that PATH and its completions only have the plain names.
+    """
+    return pmg_home() / "bin"
+
+
 def make_context(name: str, pkg: Package, tag: str) -> Context:
     """Resolves the template variables of a package."""
     from pmg.models import Context
@@ -195,7 +210,13 @@ def make_context(name: str, pkg: Package, tag: str) -> Context:
     spec = available_specs().get(name)
     spec_dir = spec.parent if spec else Path()
     base = Context(
-        tag=tag, arch=arch, data=data, bin=bin_dir, dir=data / name, dirs={}, spec_dir=spec_dir
+        tag=tag,
+        arch=arch,
+        data=data,
+        bin=bin_dir,
+        dir=packages_dir() / name,
+        dirs={},
+        spec_dir=spec_dir,
     )
     return Context(
         tag=tag,
@@ -823,7 +844,8 @@ def owned_dirs(target: Path, context: Context) -> dict[Path, Path]:
 def destination(relative: Path, name: str, tag: str) -> Path:
     """Returns the install location of a staged file of a package version.
 
-    Commands get @tag appended, man pages and completions go to the version store.
+    Commands get @tag appended in the versions bin, man pages and completions go to the version
+    store.
 
     Raises:
         PmgError: If the file is outside the layout.
@@ -832,20 +854,24 @@ def destination(relative: Path, name: str, tag: str) -> Path:
     if relative.parts[0] not in roots:  # pragma: no cover
         raise PmgError(f"{relative} is outside the install layout {sorted(roots)}")
     if relative.parts[0] == "bin":
-        return versioned(roots["bin"].joinpath(*relative.parts[1:]), tag)
+        return versioned(versions_bin().joinpath(*relative.parts[1:]), tag)
     return version_store(name, tag) / relative
 
 
 def active_links(record: Record) -> dict[Path, Path]:
     """Maps the plain paths in the shared layout to the files of the version they link to."""
-    roots, store = layout(), version_store(record.name, record.tag)
+    roots, store, commands = layout(), version_store(record.name, record.tag), versions_bin()
     links: dict[Path, Path] = {}
     for file in map(Path, record.files):
         if file.is_relative_to(store):
             relative = file.relative_to(store)
             links[roots[relative.parts[0]].joinpath(*relative.parts[1:])] = file
         else:
-            links[file.with_name(file.name.removesuffix(f"@{record.tag}"))] = file
+            # the other files are the commands, as cmd@tag in the versions bin
+            relative = file.relative_to(commands)
+            links[
+                roots["bin"] / relative.with_name(relative.name.removesuffix(f"@{record.tag}"))
+            ] = file
     return links
 
 
@@ -891,8 +917,8 @@ def activate(record: Record, records: dict[str, Record]) -> None:
         save_record(current)
     for link, target in active_links(record).items():
         link.parent.mkdir(parents=True, exist_ok=True)
-        # commands link to their version next to them, e.g. bat -> bat@v0.26.1.
-        link.symlink_to(target.name if target.parent == link.parent else target)
+        # relative, e.g. bin/bat -> ../share/pmg/bin/bat@v0.26.1, so the layout can move as a whole
+        link.symlink_to(os.path.relpath(target, link.parent))
     record.active = True
     save_record(record)
 
