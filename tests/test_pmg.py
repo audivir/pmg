@@ -1000,13 +1000,17 @@ def test_install_from_registry(tmp_path: Path, name: str) -> None:
     subprocess.check_call(  # noqa: S603
         [sys.executable, "-m", "pmg", "install", name], env=clean_environ(tmp_path)
     )
+    listed = subprocess.check_output(
+        [sys.executable, "-m", "pmg", "list"], env=clean_environ(tmp_path), text=True
+    )
     expected = {
         "patchelf": "bin/patchelf",
         "musl": "share/musl@*/lib/ld-musl-*.so.1",
         # zig only runs if it finds its lib dir through the symlink
         "zig": "share/zig@*/lib",
     }[name]
-    assert list((tmp_path / ".local").glob(expected))
+    # a system copy, like patchelf on GitHub's runners, counts as external instead
+    assert f"{name}@external " in listed or list((tmp_path / ".local").glob(expected))
 
 
 @pytest.mark.skipif(os.getenv("PMG_OFFLINE") == "1", reason="PMG_OFFLINE=1")
