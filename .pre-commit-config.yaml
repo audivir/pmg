@@ -93,3 +93,10 @@ repos:
         require_serial: true
         pass_filenames: false
         args: [pmg, tests]
+      # spec repos and editors use schema.json, so it follows the models with every commit
+      - id: schema
+        name: schema.json
+        entry: sh -c 'python -m pmg schema >schema.json'
+        language: system
+        always_run: true
+        pass_filenames: false
