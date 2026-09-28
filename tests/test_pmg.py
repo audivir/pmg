@@ -815,6 +815,28 @@ def test_spec_commands_get_certificates_without_system_ones(
     assert output.split() == [certifi.where(), certifi.where()]
 
 
+def test_failed_package_skips_only_its_dependents(env: Env) -> None:
+    env.add_package("fine")
+    env.add_package("broken", post_install="exit 1")
+    env.add_package("dependent", deps=("broken",))
+    stderr = env.pmg("install", "fine", "dependent", ok=False).stderr
+    assert "error: skipped dependent, as broken failed" in stderr
+    assert "not installed: broken, dependent" in stderr
+    assert set(env.installed()) == {"fine@v1.0"}
+
+
+def test_globs_skip_packages_not_for_the_host(env: Env) -> None:
+    write_registry(env, "1.0")
+    other = next(platform for platform in PLATFORMS if platform != detect_platform(None))
+    env.add_package("zx", spec=(f'platforms = ["{other}"]',))
+    env.add_package("zq")
+    result = env.pmg("install", "z*")
+    assert "skipped zx, not for this host" in result.stderr
+    assert set(env.installed()) == {"zq@v1.0"}
+    # requested by name, it is an error
+    assert f"zx is only for {other}" in env.pmg("install", "zx", ok=False).stderr
+
+
 def test_globs(env: Env) -> None:
     # names no host has, so none is found as external; the registry has "tool", which a missing
     # registry downloads for a glob

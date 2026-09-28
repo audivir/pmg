@@ -54,36 +54,62 @@ def install(
 ) -> None:
     """Installs packages and their dependencies.
 
+    A package that fails skips only itself and its dependents, pmg installs the others and then
+    exits with an error.
+
     Args:
         names: Names of the packages to install, each optionally with a release tag as name@tag,
-            or globs like "zst*" matching the names of specs.
+            or globs like "zst*" matching the names of specs, skipping those not for the host.
     """
     from pmg.core import (
+        PmgError,
+        dep_names,
         ensure_registry,
         exit_on_error,
         expand_globs,
         install_package,
+        is_for_host,
         is_glob,
+        load_spec,
         needed_packages,
         resolve_install_order,
     )
 
     with exit_on_error():
-        if any(is_glob(arg) for arg in names):
+        if globs := [arg for arg in names if is_glob(arg)]:
             ensure_registry()
-            names = expand_globs(names, available_specs())
+            matches = expand_globs(globs, available_specs())
+            skipped = [name for name in matches if not is_for_host(load_spec(name))]
+            if skipped:
+                logger.info("skipped %s, not for this host", ", ".join(skipped))
+            plain = [arg for arg in names if not is_glob(arg)]
+            names = [
+                *plain,
+                *(name for name in matches if name not in skipped and name not in plain),
+            ]
         requested: dict[str, list[str | None]] = {}
         for arg in names:
             name, _, tag = arg.partition("@")
             requested.setdefault(name, []).append(tag or None)
         order, specifiers = resolve_install_order(list(requested))
         needed = needed_packages(requested, order, specifiers)
+        failed: list[str] = []
         for name in (name for name in order if name in needed):
-            for requested_tag in requested.get(name, []):
-                install_package(name, explicit=True, tag=requested_tag)
-            # dependencies, or requested packages whose dependents need other versions
-            if name not in requested or name in specifiers:
-                install_package(name, explicit=False, specifier=specifiers.get(name))
+            if broken := sorted(dep_names(name) & set(failed)):
+                logger.error("error: skipped %s, as %s failed", name, ", ".join(broken))
+                failed.append(name)
+                continue
+            try:
+                for requested_tag in requested.get(name, []):
+                    install_package(name, explicit=True, tag=requested_tag)
+                # dependencies, or requested packages whose dependents need other versions
+                if name not in requested or name in specifiers:
+                    install_package(name, explicit=False, specifier=specifiers.get(name))
+            except PmgError as e:
+                logger.error("error: %s", e)  # noqa: TRY400
+                failed.append(name)
+        if failed:
+            raise PmgError(f"not installed: {', '.join(failed)}")
 
 
 def uninstall(

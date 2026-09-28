@@ -342,6 +342,20 @@ def detect_platform(min_glibc: Version | None) -> Platform:
     return host
 
 
+def is_for_host(pkg: Package) -> bool:
+    """Checks whether a package is for the host.
+
+    Its platforms must include the host, and it must have an asset for the host if its download
+    needs one.
+    """
+    from pmg.models import ApkDownload, CommandDownload
+
+    host = detect_platform(pkg.min_glibc_version)
+    if pkg.platforms and host not in pkg.platforms:
+        return False
+    return isinstance(pkg.download, ApkDownload | CommandDownload) or host in pkg.assets
+
+
 @functools.cache
 def system_certificates() -> bool:
     """Checks whether the host has CA certificates where OpenSSL looks for them."""
@@ -1313,6 +1327,15 @@ def needs_installing(
         nothing_to_install(name, pkg, host, versions, explicit, tag, specifier, False)
         for tag in tags
     )
+
+
+def dep_names(name: str) -> set[str]:
+    """Returns the names of the dependencies of a package on the host."""
+    spec = load_spec(name)
+    return {
+        dep.name
+        for dep in requirements(package_deps(spec, detect_platform(spec.min_glibc_version)))
+    }
 
 
 def needed_packages(
