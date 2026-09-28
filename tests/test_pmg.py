@@ -815,6 +815,21 @@ def test_spec_commands_get_certificates_without_system_ones(
     assert output.split() == [certifi.where(), certifi.where()]
 
 
+def test_progress_on_a_terminal(
+    env: Env, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("PMG_HOME", str(env.pmg_home))
+    monkeypatch.setattr(pmg.core, "interactive", lambda: True)
+    (env.assets / "archive.tar.gz").write_bytes(b"x" * 100_000)
+    dest = env.root / "archive.tar.gz"
+    pmg.core.download_file(f"{env.base_url}/archive.tar.gz", dest)
+    assert dest.stat().st_size == 100_000
+    # the bar of the download, which it clears once done
+    assert "archive.tar.gz" in capsys.readouterr().err
+    # the spinner of a spec command leaves its output alone
+    assert pmg.core.run_shell("tool", "post_install", "echo built") == "built\n"
+
+
 def test_errors_show_no_traceback(env: Env) -> None:
     # the test server has no registry, so downloading it fails with a 404
     stderr = env.pmg("install", "z*", ok=False).stderr

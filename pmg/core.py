@@ -376,6 +376,23 @@ def spec_shell() -> str:
     return shutil.which("bash") or "/bin/sh"
 
 
+def interactive() -> bool:
+    """Checks whether stderr is a terminal, the only place pmg shows progress."""
+    return sys.stderr.isatty()
+
+
+@contextlib.contextmanager
+def spinner(text: str) -> Generator[None]:
+    """Shows a spinner with the text while the block runs, on a terminal."""
+    if not interactive():
+        yield
+        return
+    from rich.console import Console
+
+    with Console(stderr=True).status(text):
+        yield
+
+
 def run_shell(
     name: str, step: str, cmd: str, cwd: Path | None = None, env: dict[str, str] | None = None
 ) -> str:
@@ -396,24 +413,25 @@ def run_shell(
         # not the current dir, where a spec dir holding uv.toml would configure uv
         cwd = pmg_home()
         cwd.mkdir(parents=True, exist_ok=True)
-    # spec commands are shell commands by design.
-    result = subprocess.run(  # noqa: S602
-        f"set -euo pipefail\n{cmd}",
-        shell=True,
-        executable=spec_shell(),
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        check=False,
-        # commands installed as dependencies are in the bin dir, which may not be in PATH.
-        env={
-            **os.environ,
-            "PATH": f"{layout()['bin']}{os.pathsep}{os.getenv('PATH', '')}",
-            # the certificates pmg downloads with, for hosts without their own
-            **certificates,
-            **(env or {}),
-        },
-    )
+    # spec commands are shell commands by design; builds in post_install take minutes
+    with spinner(f"{step} of {name}"):
+        result = subprocess.run(  # noqa: S602
+            f"set -euo pipefail\n{cmd}",
+            shell=True,
+            executable=spec_shell(),
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            # commands installed as dependencies are in the bin dir, which may not be in PATH.
+            env={
+                **os.environ,
+                "PATH": f"{layout()['bin']}{os.pathsep}{os.getenv('PATH', '')}",
+                # the certificates pmg downloads with, for hosts without their own
+                **certificates,
+                **(env or {}),
+            },
+        )
     if result.returncode:
         # build warnings and progress only matter when the command fails
         stderr = "".join(result.stderr.splitlines(keepends=True)[-20:])
@@ -543,13 +561,17 @@ def fetch_release(name: str, pkg: Package, host: Platform) -> str:
 
 def download_file(url: str, dest: Path, checksum: str | None = None) -> Path:
     """Downloads `url` to `dest`, verifying `checksum` ("sha256:<hex>") if given."""
-    from pmg.consumers import Files
+    from pmg.consumers import Files, TransientProgress
 
     parts = urlsplit(url)
     path = parts.path.lstrip("/") + (f"?{parts.query}" if parts.query else "")
     files = Files(base_url=f"{parts.scheme}://{parts.netloc}", follow_redirects=True)
+    download = files.download(path=path)
     # overwrite, as a .part left by a failed checksum would otherwise be resumed.
-    return files.download(path=path)(dest, checksum=checksum, overwrite=True)
+    if not interactive():
+        return download(dest, checksum=checksum, overwrite=True)
+    with TransientProgress(desc=dest.name, file=sys.stderr) as progress:
+        return download(dest, checksum=checksum, overwrite=True, on_progress=progress)
 
 
 def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath) -> list[Path]:

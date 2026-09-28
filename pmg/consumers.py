@@ -5,11 +5,31 @@ Imports `mxhttp` on imports, try not to import globally.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, override
 
-from mxhttp import Downloader, RawPath, SyncConsumer, base_url, get
+from mxhttp import Downloader, RawPath, SyncConsumer, TqdmProgress, base_url, get
 
 from pmg.models import GitHubReleaseInfo  # noqa: TC001
+
+if TYPE_CHECKING:
+    from tqdm import tqdm
+
+
+class TransientProgress(TqdmProgress):
+    """Shows the progress of a download in a bar that disappears once the download is done."""
+
+    @override
+    def start(
+        self,
+        initial: int,
+        total: int | None,
+        *,
+        position: int = 0,
+        desc: str | None = None,
+        leave: bool = True,
+    ) -> tqdm:
+        """Starts the bar, which is removed when closed instead of left in the output."""
+        return super().start(initial, total, position=position, desc=desc, leave=False)
 
 
 @base_url("https://api.github.com")
