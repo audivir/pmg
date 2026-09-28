@@ -822,6 +822,10 @@ packages = ["tool", "toollib"]
     env.pmg("install", "tool")
     assert env.installed() == {"tool@1.0-r0": "explicit active"}
     assert env.run_bin("tool") == "alpine tool"
+    # the index comes from the cache now
+    (repo / "APKINDEX.tar.gz").unlink()
+    env.pmg("uninstall", "tool")
+    env.pmg("install", "tool")
     root = env.data / "tool@1.0-r0"
     assert sorted(str(path.relative_to(root)) for path in root.rglob("*")) == [
         "usr",
@@ -880,6 +884,10 @@ channel = "cf"
     )
     env.pmg("install", "sysroot")
     assert env.installed() == {"sysroot@2.28": "explicit active"}
+    # the file list comes from the cache now
+    (api / "files").unlink()
+    env.pmg("uninstall", "sysroot")
+    env.pmg("install", "sysroot")
     root = env.data / "sysroot@2.28"
     assert sorted(str(path.relative_to(root)) for path in root.rglob("*")) == [
         "lib64",

@@ -127,7 +127,8 @@ eval "$(python -m pmg env)"
   whether it is active.
 - Set `PMG_GH_TOKEN` (or `GH_TOKEN`) to avoid the rate limit of the GitHub API.
 - `PMG_ALPINE_MIRROR`, `PMG_CONDA_API`, and `PMG_CONDA_URL` replace the Alpine mirror, the
-  anaconda.org API, and the conda download server.
+  anaconda.org API, and the conda download server. Their indexes are cached for an hour in
+  `$XDG_CACHE_HOME/pmg`.
 
 pmg ships specs for `glibc` (for running glibc programs on musl hosts), `musl` (the reverse),
 `musl-libs` (libstdc++ and libgcc_s for musl hosts), and `patchelf`.

@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import graphlib
+import hashlib
 import logging
 import os
 import platform
@@ -78,6 +79,8 @@ HOST_PLATFORMS: dict[tuple[str, str], Platform] = {
 """Platform for each libc and machine, as reported by `platform.machine`."""
 COMPLETION_NAMES = {"zsh": "_{}", "bash": "{}", "fish": "{}.fish"}
 """File name of the completion script of a command for each shell."""
+CACHE_SECONDS = 3600
+"""Age after which indexes of Alpine and conda packages are downloaded again."""
 TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".apk")
 ZSTD_SUFFIXES = (".tar.zst", ".tzst")
 
@@ -99,14 +102,6 @@ class GitHubApi(SyncConsumer):
     @get("/repos/{owner}/{name}/releases/tags/{tag}")
     def release(self, owner: str, name: str, tag: str) -> GitHubReleaseInfo:  # type: ignore[empty-body]
         """Fetches the release of a repo with the given tag."""
-
-
-class CondaApi(SyncConsumer):
-    """Wraps the package files endpoint of the anaconda.org API."""
-
-    @get("/package/{channel}/{package}/files")
-    def files(self, channel: str, package: str) -> list[CondaFile]:  # type: ignore[empty-body]
-        """Fetches all files of a package in a channel."""
 
 
 class Files(SyncConsumer):
@@ -331,6 +326,20 @@ def run_shell(
     return result.stdout
 
 
+def cache_dir() -> Path:
+    """Returns the cache dir of pmg in `$XDG_CACHE_HOME`."""
+    return Path(os.getenv("XDG_CACHE_HOME") or Path.home() / ".cache") / "pmg"
+
+
+def cached_download(url: str) -> Path:
+    """Downloads `url` to the cache, unless it was downloaded within the last hour."""
+    path = cache_dir() / hashlib.sha256(url.encode()).hexdigest()[:16]
+    if path.exists() and time.time() - path.stat().st_mtime < CACHE_SECONDS:
+        return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return download_file(url, path)
+
+
 def alpine_repo() -> str:
     """Returns the URL of the main Alpine repo of the host release, or else of latest-stable."""
     mirror = os.getenv("PMG_ALPINE_MIRROR") or "https://dl-cdn.alpinelinux.org/alpine"
@@ -347,13 +356,12 @@ def alpine_repo() -> str:
 @functools.cache
 def apk_index(repo: str) -> dict[str, str]:
     """Maps the packages of an Alpine repo to their versions."""
-    with tempfile.TemporaryDirectory() as tmp:
-        index = download_file(f"{repo}/APKINDEX.tar.gz", Path(tmp) / "APKINDEX.tar.gz")
-        with tarfile.open(index) as tar_file:
-            member = tar_file.extractfile("APKINDEX")
-            if member is None:  # pragma: no cover
-                raise PmgError(f"{repo} has no APKINDEX")
-            text = member.read().decode()
+    index = cached_download(f"{repo}/APKINDEX.tar.gz")
+    with tarfile.open(index) as tar_file:
+        member = tar_file.extractfile("APKINDEX")
+        if member is None:  # pragma: no cover
+            raise PmgError(f"{repo} has no APKINDEX")
+        text = member.read().decode()
     versions: dict[str, str] = {}
     # blocks of "X:value" lines, P is the package and V its version
     for block in text.split("\n\n"):
@@ -381,10 +389,11 @@ def conda_file(channel: str, package: str, version: str | None = None) -> CondaF
     Raises:
         PmgError: If the package has no such file.
     """
-    api = CondaApi(base_url=os.getenv("PMG_CONDA_API") or "https://api.anaconda.org")
+    api = os.getenv("PMG_CONDA_API") or "https://api.anaconda.org"
+    listing = cached_download(f"{api}/package/{channel}/{package}/files")
     files = [
         file
-        for file in api.files(channel=channel, package=package)
+        for file in msgspec.json.decode(listing.read_bytes(), type=list[CondaFile])
         # conda-forge publishes placeholder builds as 9999
         if file.basename.endswith(".conda") and file.version != "9999"
         if tag_version(file.version) is not None and version in {None, file.version}
