@@ -17,59 +17,31 @@ from __future__ import annotations
 import contextlib
 import functools
 import graphlib
-import hashlib
 import logging
 import os
 import platform
 import re
-import shlex
 import shutil
-import ssl
 import subprocess
 import sys
-import tarfile
 import tempfile
 import time
-import zipfile
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Annotated
+from typing import IO, TYPE_CHECKING
 from urllib.parse import urlsplit
 
-import certifi
-import doctyper
-import jinja2
-import msgspec
-import zstandard
-from mxhttp import BearerAuth, Downloader, RawPath, SyncConsumer, base_url, get
-from packaging.requirements import Requirement
-from packaging.specifiers import SpecifierSet
-from packaging.version import Version
-
-from pmg.models import (
-    ApkDownload,
-    ApkRelease,
-    Check,
-    CommandDownload,
-    CommandRelease,
-    CondaDownload,
-    CondaFile,
-    CondaRelease,
-    Context,
-    GitHubDownload,
-    GitHubRelease,
-    GitHubReleaseInfo,
-    Package,
-    Platform,
-    Record,
-    UrlDownload,
-    requirements,
-    tag_version,
-)
+from pmg.packaging_utils import requirements, tag_version
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
+    import jinja2
     from _typeshed import StrPath
+    from packaging.specifiers import SpecifierSet
+    from packaging.version import Version
+
+    from pmg.consumers import GitHubApi
+    from pmg.models import CondaFile, Context, Package, Platform, Record
 
 GH_TOKEN_ENV = "PMG_GH_TOKEN"  # noqa: S105
 REGISTRY_URL = "https://github.com/audivir/pmg-specs/archive/refs/heads/main.tar.gz"
@@ -96,32 +68,11 @@ CACHE_SECONDS = 3600
 TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".apk")
 ZSTD_SUFFIXES = (".tar.zst", ".tzst")
 
-logger = logging.getLogger("pmg")
+logger = logging.getLogger(__package__)
 
 
 class PmgError(Exception):
     """A package could not be resolved, installed, or uninstalled."""
-
-
-@base_url("https://api.github.com")
-class GitHubApi(SyncConsumer):
-    """Wraps the release endpoints of the GitHub API."""
-
-    @get("/repos/{owner}/{name}/releases/latest")
-    def latest_release(self, owner: str, name: str) -> GitHubReleaseInfo:  # type: ignore[empty-body]
-        """Fetches the latest release of a repo."""
-
-    @get("/repos/{owner}/{name}/releases/tags/{tag}")
-    def release(self, owner: str, name: str, tag: str) -> GitHubReleaseInfo:  # type: ignore[empty-body]
-        """Fetches the release of a repo with the given tag."""
-
-
-class Files(SyncConsumer):
-    """Wraps file downloads from a single host."""
-
-    @get("/{path}")
-    def download(self, path: Annotated[str, RawPath]) -> Downloader:  # type: ignore[empty-body]
-        """Binds the download of a path on the host."""
 
 
 def data_home() -> Path:
@@ -182,6 +133,8 @@ def version_store(name: str, tag: str) -> Path:
 
 def make_context(name: str, pkg: Package, tag: str) -> Context:
     """Resolves the template variables of a package."""
+    from pmg.models import Context
+
     data, bin_dir = data_home(), layout()["bin"]
     arch = platform.machine()
     spec = available_specs().get(name)
@@ -202,6 +155,10 @@ def make_context(name: str, pkg: Package, tag: str) -> Context:
 
 def decode(spec: str) -> Package:
     """Decodes a TOML package spec."""
+    import msgspec
+
+    from pmg.models import Package
+
     return msgspec.toml.decode(spec, type=Package)
 
 
@@ -211,6 +168,8 @@ def load_spec(name: str) -> Package:
     Raises:
         PmgError: If the spec is missing or invalid.
     """
+    import msgspec
+
     path = available_specs().get(name)
     # the first use of pmg downloads the registry
     if path is None and not registry_dir().exists():
@@ -246,6 +205,10 @@ def record_path(key: str) -> Path:
 
 def load_records() -> dict[str, Record]:
     """Loads the install records of all installed package versions, by name@tag."""
+    import msgspec
+
+    from pmg.models import Record
+
     records_dir = pmg_home() / "installed"
     if not records_dir.is_dir():
         return {}
@@ -257,6 +220,8 @@ def load_records() -> dict[str, Record]:
 
 def save_record(record: Record) -> None:
     """Writes the install record of a package version atomically."""
+    import msgspec
+
     path = record_path(record.key)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".json.tmp")
@@ -267,6 +232,10 @@ def save_record(record: Record) -> None:
 @functools.cache
 def github_api() -> GitHubApi:
     """Returns the GitHub API client, authenticated if a token is set."""
+    from mxhttp import BearerAuth
+
+    from pmg.consumers import GitHubApi
+
     token = os.getenv(GH_TOKEN_ENV) or os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
     return GitHubApi(auth=BearerAuth(token) if token else None)
 
@@ -280,6 +249,8 @@ def split_repo(repo: str) -> tuple[str, str]:
 @functools.cache
 def jinja_env() -> jinja2.Environment:
     """Returns the Jinja environment, which treats undefined variables as errors."""
+    import jinja2
+
     # renders file names and URLs, not HTML.
     return jinja2.Environment(undefined=jinja2.StrictUndefined, keep_trailing_newline=True)  # noqa: S701
 
@@ -291,6 +262,8 @@ def render(template: str, context: Context, **extra: str) -> str:
 
 def glibc_version() -> Version | None:
     """Returns the glibc version of the host, or None on musl and macOS."""
+    from packaging.version import Version
+
     value: str | None = None
     with contextlib.suppress(ValueError, OSError):
         # only glibc knows the name, other hosts raise.
@@ -317,6 +290,8 @@ def detect_platform(min_glibc: Version | None) -> Platform:
 @functools.cache
 def system_certificates() -> bool:
     """Checks whether the host has CA certificates where OpenSSL looks for them."""
+    import ssl
+
     paths = ssl.get_default_verify_paths()
     capath = Path(paths.openssl_capath)
     return Path(paths.openssl_cafile).is_file() or (capath.is_dir() and any(capath.iterdir()))
@@ -342,6 +317,12 @@ def run_shell(
     Raises:
         PmgError: If the command fails.
     """
+    certificates: dict[str, str] = {}
+    if not system_certificates():
+        import certifi
+
+        certificates = {"CURL_CA_BUNDLE": certifi.where(), "SSL_CERT_FILE": certifi.where()}
+
     if cwd is None:
         # not the current dir, where a spec dir holding uv.toml would configure uv
         cwd = pmg_home()
@@ -360,11 +341,7 @@ def run_shell(
             **os.environ,
             "PATH": f"{layout()['bin']}{os.pathsep}{os.getenv('PATH', '')}",
             # the certificates pmg downloads with, for hosts without their own
-            **(
-                {}
-                if system_certificates()
-                else {"CURL_CA_BUNDLE": certifi.where(), "SSL_CERT_FILE": certifi.where()}
-            ),
+            **certificates,
             **(env or {}),
         },
     )
@@ -382,6 +359,8 @@ def cache_dir() -> Path:
 
 def cached_download(url: str) -> Path:
     """Downloads `url` to the cache, unless it was downloaded within the last hour."""
+    import hashlib
+
     path = cache_dir() / hashlib.sha256(url.encode()).hexdigest()[:16]
     if path.exists() and time.time() - path.stat().st_mtime < CACHE_SECONDS:
         return path
@@ -405,6 +384,8 @@ def alpine_repo() -> str:
 @functools.cache
 def apk_index(repo: str) -> dict[str, str]:
     """Maps the packages of an Alpine repo to their versions."""
+    import tarfile
+
     index = cached_download(f"{repo}/APKINDEX.tar.gz")
     with tarfile.open(index) as tar_file:
         member = tar_file.extractfile("APKINDEX")
@@ -438,6 +419,10 @@ def conda_file(channel: str, package: str, version: str | None = None) -> CondaF
     Raises:
         PmgError: If the package has no such file.
     """
+    import msgspec
+
+    from pmg.models import CondaFile
+
     api = os.getenv("PMG_CONDA_API") or "https://api.anaconda.org"
     listing = cached_download(f"{api}/package/{channel}/{package}/files")
     files = [
@@ -470,6 +455,8 @@ def fetch_release(name: str, pkg: Package, host: Platform) -> str:
     Raises:
         PmgError: If a release command fails or prints no tag.
     """
+    from pmg.models import ApkRelease, CommandRelease, CondaRelease, GitHubRelease
+
     rl = pkg.release
     if isinstance(rl, GitHubRelease):
         return github_api().latest_release(*split_repo(rl.repo)).tag_name
@@ -487,6 +474,8 @@ def fetch_release(name: str, pkg: Package, host: Platform) -> str:
 
 def download_file(url: str, dest: Path, checksum: str | None = None) -> Path:
     """Downloads `url` to `dest`, verifying `checksum` ("sha256:<hex>") if given."""
+    from pmg.consumers import Files
+
     parts = urlsplit(url)
     path = parts.path.lstrip("/") + (f"?{parts.query}" if parts.query else "")
     files = Files(base_url=f"{parts.scheme}://{parts.netloc}", follow_redirects=True)
@@ -500,6 +489,8 @@ def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath
     Raises:
         PmgError: If there is no asset for the host platform.
     """
+    from pmg.models import ApkDownload, ApkRelease, CommandDownload, CondaDownload, GitHubDownload
+
     dl_dir = Path(dl_dir)
     dl, tag = pkg.download, context.tag
     if isinstance(dl, CommandDownload):
@@ -537,6 +528,10 @@ def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath
 
 def extract_tar_zst(fileobj: IO[bytes], dest: Path) -> None:
     """Extracts a zstd-compressed tar stream into `dest`."""
+    import tarfile
+
+    import zstandard
+
     with (
         zstandard.ZstdDecompressor().stream_reader(fileobj) as reader,
         tarfile.open(fileobj=reader, mode="r|") as tar_file,
@@ -549,6 +544,9 @@ def unpack(archive: Path, dest: Path) -> None:
 
     Alpine packages lose their metadata files, conda packages keep only their payload.
     """
+    import tarfile
+    import zipfile
+
     dest.mkdir(parents=True, exist_ok=True)
     if archive.name.endswith(".conda"):
         with zipfile.ZipFile(archive) as zip_file:
@@ -662,6 +660,8 @@ def package_env(pkg: Package, context: Context) -> dict[str, str]:
 
 def staged_context(context: Context, target: Path) -> Context:
     """Returns the context with the package dirs in the staging dir."""
+    import msgspec
+
     dirs = {key: target / "dirs" / key for key in context.dirs}
     return msgspec.structs.replace(context, dir=target / "dir", dirs=dirs)
 
@@ -677,6 +677,8 @@ def run_install(
     Raises:
         PmgError: If a file is missing from the archives or a spec command fails.
     """
+    from pmg.models import CommandDownload, GitHubDownload, UrlDownload
+
     env = package_env(pkg, staged_context(context, target)) | {"PREFIX": str(target)}
     if isinstance(pkg.download, CommandDownload):
         run_shell(name, "download command", render(pkg.download.cmd, context), target, env)
@@ -895,6 +897,8 @@ def find_external(name: str, pkg: Package) -> Record | None:
     The files and libraries of the check must exist, and its command must run. Without any of
     them, the first command of the package, or else its name, is looked up in PATH.
     """
+    from pmg.models import Check, Record
+
     context = make_context(name, pkg, "external")
     check = pkg.check or Check()
     files = [Path(render(file, context)) for file in check.files]
@@ -961,6 +965,8 @@ def resolve_install_order(names: list[str]) -> tuple[list[str], dict[str, Specif
     Raises:
         PmgError: If the dependencies form a cycle.
     """
+    from packaging.specifiers import SpecifierSet
+
     sorter: graphlib.TopologicalSorter[str] = graphlib.TopologicalSorter()
     specifiers: dict[str, SpecifierSet] = {}
     pending = list(names)
@@ -994,6 +1000,8 @@ def dependency_vars(
 
     Dependencies not in use on the host, e.g. those of other platforms, are empty.
     """
+    from packaging.requirements import Requirement
+
     declared = [*pkg.deps, *(dep for deps in pkg.platform_deps.values() for dep in deps)]
     variables = {Requirement(dep).name: {"dir": "", "version": ""} for dep in declared}
     for dep in requirements(package_deps(pkg, host)):
@@ -1051,6 +1059,10 @@ def install_package(
         PmgError: If the package is not for the host, or its latest release does not meet the
             specifier.
     """
+    from packaging.specifiers import SpecifierSet
+
+    from pmg.models import Record
+
     specifier = specifier or SpecifierSet()
     records = load_records()
     pkg = load_spec(name)
@@ -1223,27 +1235,6 @@ def upgrade_package(name: str) -> None:
         logger.info("kept %s: %s", active.key, e)
 
 
-def complete_available(incomplete: str) -> list[str]:
-    """Completes the names of the packages with a spec, downloading the registry if missing."""
-    if not registry_dir().exists():
-        # quietly, as the output would land in the middle of the command line
-        level = logger.level
-        logger.setLevel(logging.WARNING)
-        try:
-            with contextlib.suppress(Exception):
-                update_registry()
-        finally:
-            logger.setLevel(level)
-    return [name for name in available_specs() if name.startswith(incomplete)]
-
-
-def complete_installed(incomplete: str) -> list[str]:
-    """Completes the names of installed packages and their versions as name@tag."""
-    records = load_records()
-    names = {record.name for record in records.values()} | set(records)
-    return sorted(name for name in names if name.startswith(incomplete))
-
-
 @contextlib.contextmanager
 def exit_on_error() -> Generator[None]:
     """Logs a `PmgError` and exits with code 1, and updates the env file either way."""
@@ -1273,6 +1264,8 @@ def needed_packages(
     requested: dict[str, list[str | None]], order: list[str], specifiers: dict[str, SpecifierSet]
 ) -> set[str]:
     """Returns the requested packages and the dependencies of those that get installed."""
+    from packaging.specifiers import SpecifierSet
+
     needed = set(requested)
     # dependents come before their dependencies, so a package found outside pmg or not for the
     # host pulls in none of its dependencies
@@ -1287,63 +1280,10 @@ def needed_packages(
     return needed
 
 
-def install(
-    names: Annotated[list[str], doctyper.Argument(autocompletion=complete_available)],
-) -> None:
-    """Installs packages and their dependencies.
-
-    Args:
-        names: Names of the packages to install, each optionally with a release tag as name@tag.
-    """
-    with exit_on_error():
-        requested: dict[str, list[str | None]] = {}
-        for arg in names:
-            name, _, tag = arg.partition("@")
-            requested.setdefault(name, []).append(tag or None)
-        order, specifiers = resolve_install_order(list(requested))
-        needed = needed_packages(requested, order, specifiers)
-        for name in (name for name in order if name in needed):
-            for requested_tag in requested.get(name, []):
-                install_package(name, explicit=True, tag=requested_tag)
-            # dependencies, or requested packages whose dependents need other versions
-            if name not in requested or name in specifiers:
-                install_package(name, explicit=False, specifier=specifiers.get(name))
-
-
-def uninstall(
-    names: Annotated[list[str], doctyper.Argument(autocompletion=complete_installed)],
-) -> None:
-    """Uninstalls packages; their dependencies stay until `autoremove`.
-
-    Args:
-        names: Names of the packages to uninstall with all their versions, or name@tag for one.
-    """
-    with exit_on_error():
-        uninstall_packages(names)
-
-
-def autoremove() -> None:
-    """Uninstalls dependencies that no directly installed package needs anymore."""
-    with exit_on_error():
-        if orphans := find_orphans(load_records()):
-            uninstall_packages(orphans)
-
-
-def upgrade(
-    names: Annotated[list[str] | None, doctyper.Argument(autocompletion=complete_installed)] = None,
-) -> None:
-    """Upgrades packages to their latest release.
-
-    Args:
-        names: Names of the packages to upgrade, all installed ones if none are given.
-    """
-    with exit_on_error():
-        for name in sorted(set(names or (record.name for record in load_records().values()))):
-            upgrade_package(name)
-
-
 def env_code() -> str:
     """Returns shell code setting the environment and PATH entries of the active versions."""
+    import shlex
+
     lines: list[str] = []
     paths: list[str] = []
     for record in load_records().values():
@@ -1378,79 +1318,3 @@ def write_shell_files() -> None:
     completion = layout()["zsh"] / "_pmg"
     if not completion.is_file() or completion.read_text() != ZSH_COMPLETION:
         write_file(completion, ZSH_COMPLETION)
-
-
-def print_env() -> None:
-    """Prints shell code setting the environment and PATH entries of the active versions."""
-    print(env_code(), end="")  # noqa: T201
-
-
-def external(name: Annotated[str, doctyper.Argument(autocompletion=complete_available)]) -> None:
-    """Prints the names of a package in system package managers, as "manager name" lines.
-
-    Args:
-        name: Name of the package.
-    """
-    with exit_on_error():
-        for manager, package in msgspec.structs.asdict(load_spec(name).external).items():
-            if package:
-                print(f"{manager} {package}")  # noqa: T201
-
-
-def update() -> None:
-    """Updates the specs from their repo."""
-    with exit_on_error():
-        update_registry()
-
-
-def print_schema() -> None:
-    """Prints the JSON schema of specs, which the `schema.json` of this repo keeps for editors."""
-    print(msgspec.json.format(msgspec.json.encode(msgspec.json.schema(Package))).decode())  # noqa: T201
-
-
-def print_completion() -> None:
-    """Prints the zsh completion of pmg, which pmg also writes next to the other completions."""
-    print(ZSH_COMPLETION, end="")  # noqa: T201
-
-
-def validate(paths: Annotated[list[Path], doctyper.Argument()]) -> None:
-    """Checks spec files against the models of pmg, e.g. in the CI of a spec repo.
-
-    Args:
-        paths: Spec files to check.
-    """
-    invalid = 0
-    for path in paths:
-        try:
-            decode(path.read_text())
-        except msgspec.ValidationError as e:
-            logger.error("%s: %s", path, e)  # noqa: TRY400
-            invalid += 1
-    if invalid:
-        raise SystemExit(1)
-    logger.info("%d specs are valid", len(paths))
-
-
-def use(name: Annotated[str, doctyper.Argument(autocompletion=complete_installed)]) -> None:
-    """Makes a version the one the plain command names, man pages, and completions link to.
-
-    Args:
-        name: Package version as name@tag.
-    """
-    with exit_on_error():
-        records = load_records()
-        record = records.get(name)
-        if record is None:  # pragma: no cover
-            raise PmgError(f"not installed: {name}")
-        activate(record, records)
-
-
-def list_installed() -> None:
-    """Lists the installed package versions."""
-    for key, record in load_records().items():
-        words = [key, "explicit" if record.explicit else "dependency"]
-        if record.active:
-            words.append("active")
-        if record.external:
-            words += ["external", record.external_version or "unknown"]
-        print(" ".join(words))  # noqa: T201

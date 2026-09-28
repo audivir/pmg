@@ -1,14 +1,19 @@
-"""Package specs, install records, and GitHub API responses."""
+"""Package specs, install records, and GitHub API responses.
+
+Imports `msgspec` on import, try not to import globally.
+"""
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
-from typing import Literal, NotRequired, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Literal, NotRequired, TypeAlias, TypedDict
 
 import msgspec
-from packaging.requirements import Requirement
-from packaging.version import InvalidVersion, Version
+
+from pmg.packaging_utils import requirements
+
+if TYPE_CHECKING:
+    from packaging.version import Version
 
 Command: TypeAlias = str
 Platform: TypeAlias = Literal["glibc_x64", "glibc_arm64", "musl_x64", "musl_arm64", "macos_arm64"]
@@ -200,6 +205,8 @@ class Package(BaseStruct, kw_only=True):
         Raises:
             ValueError: If a dependency, `min_glibc`, or the download repo is invalid.
         """
+        from packaging.version import Version
+
         requirements([*self.deps, *(dep for deps in self.platform_deps.values() for dep in deps)])
         if self.min_glibc:
             Version(self.min_glibc)
@@ -214,6 +221,8 @@ class Package(BaseStruct, kw_only=True):
     @property
     def min_glibc_version(self) -> Version | None:
         """Oldest glibc for the glibc assets as a version."""
+        from packaging.version import Version
+
         return Version(self.min_glibc) if self.min_glibc else None
 
 
@@ -302,35 +311,3 @@ class GitHubReleaseInfo(msgspec.Struct, kw_only=True):
 
     tag_name: str
     assets: list[GitHubAsset]
-
-
-def requirements(deps: list[str]) -> list[Requirement]:
-    """Parses dependencies like "lib>=1.2,<2" or "lib; sys_platform == 'linux'" for the host.
-
-    Dependencies whose environment marker does not match the host are left out.
-
-    Raises:
-        ValueError: If a dependency is invalid or has extras or a URL.
-    """
-    parsed = [Requirement(dep) for dep in deps]
-    for requirement in parsed:
-        if requirement.extras or requirement.url:  # pragma: no cover
-            raise ValueError(
-                f"only a name, a version specifier, and a marker are allowed: {requirement}"
-            )
-    return [
-        requirement
-        for requirement in parsed
-        if not requirement.marker or requirement.marker.evaluate()
-    ]
-
-
-def tag_version(tag: str) -> Version | None:
-    """Returns the first version in a release tag, e.g. 1.27.1 in go1.27.1."""
-    match = re.search(r"\d+(?:\.\d+)*", tag)
-    if match is None:  # pragma: no cover
-        return None
-    try:
-        return Version(match.group())
-    except InvalidVersion:  # pragma: no cover
-        return None

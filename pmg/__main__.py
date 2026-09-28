@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import logging
+import os
+
+logger = logging.getLogger(__package__)
+
 
 def main() -> None:
     """Runs the pmg command line, the entry point of the pmg command."""
-    import logging
-
     import doctyper
 
-    from pmg.core import (
+    from pmg.cli import (
         autoremove,
         external,
         install,
         list_installed,
-        logger,
         print_completion,
         print_env,
         print_schema,
@@ -25,9 +27,15 @@ def main() -> None:
         validate,
     )
 
-    # info for pmg only, as httpx logs every request at info.
+    # reduce completions time
+    if "_PMG_COMPLETE" in os.environ:
+        import doctyper._completion_classes
+
+        doctyper._completion_classes._sanitize_help_text = lambda text: text  # noqa: SLF001
+
     logging.basicConfig(format="%(message)s")
     logger.setLevel(logging.INFO)
+
     app = doctyper.DocTyper(help=__doc__, add_completion=True)
     app.command()(install)
     app.command()(uninstall)
