@@ -57,8 +57,9 @@ ZSH_COMPLETION = """#compdef pmg
 # asks pmg for the completions, like `_PMG_COMPLETE=source_zsh pmg` prints, but autoloadable
 local completions
 completions="$(env _TYPER_COMPLETE_ARGS="${words[1,$CURRENT]}" _PMG_COMPLETE=complete_zsh pmg)"
-# pmg falls back to completing files without a match, but only packages make sense
-[[ "$completions" == _files ]] || eval "$completions"
+# pmg answers _files for paths, and also without a match, where only packages make sense; validate
+# is the only command taking paths
+[[ "$completions" == _files && "${words[2]}" != validate ]] || eval "$completions"
 """
 """zsh completion of pmg, as an autoloadable function."""
 COMPLETION_NAMES = {"zsh": "_{}", "bash": "{}", "fish": "{}.fish"}

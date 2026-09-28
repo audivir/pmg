@@ -741,6 +741,32 @@ def test_registry(env: Env) -> None:
     assert env.run_bin("tool") == "registry 2.0"
 
 
+@pytest.mark.skipif(shutil.which("zsh") is None, reason="no zsh")
+@pytest.mark.parametrize(("command", "completes_files"), [("validate", True), ("install", False)])
+def test_zsh_completion_completes_files_only_for_validate(
+    tmp_path: Path, command: str, completes_files: bool
+) -> None:
+    # pmg answers _files for the paths of validate, as without a match
+    fake_pmg = tmp_path / "pmg"
+    fake_pmg.write_text("#!/bin/sh\necho _files\n")
+    fake_pmg.chmod(0o755)
+    # the completion as the body of _pmg, with an eval that shows what it would run
+    script = f"""eval() {{ print -r -- "eval $*"; }}
+_pmg() {{
+{pmg.core.ZSH_COMPLETION}}}
+words=(pmg {command} x)
+CURRENT=3
+_pmg"""
+    result = subprocess.run(  # noqa: S603
+        ["zsh", "-fc", script],  # noqa: S607
+        env={**os.environ, "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert (result.stdout == "eval _files\n") == completes_files
+
+
 def test_completions(env: Env) -> None:
     env.add_package("tool", version="1.0")
     env.add_package("other")
