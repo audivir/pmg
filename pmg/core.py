@@ -1199,6 +1199,18 @@ def upgrade_package(name: str) -> None:
         logger.info("kept %s: %s", active.key, e)
 
 
+def complete_available(incomplete: str) -> list[str]:
+    """Completes the names of the packages with a spec."""
+    return [name for name in available_specs() if name.startswith(incomplete)]
+
+
+def complete_installed(incomplete: str) -> list[str]:
+    """Completes the names of installed packages and their versions as name@tag."""
+    records = load_records()
+    names = {record.name for record in records.values()} | set(records)
+    return sorted(name for name in names if name.startswith(incomplete))
+
+
 @contextlib.contextmanager
 def exit_on_error() -> Generator[None]:
     """Logs a `PmgError` and exits with code 1."""
@@ -1240,7 +1252,9 @@ def needed_packages(
     return needed
 
 
-def install(names: list[str]) -> None:
+def install(
+    names: Annotated[list[str], doctyper.Argument(autocompletion=complete_available)],
+) -> None:
     """Installs packages and their dependencies.
 
     Args:
@@ -1261,7 +1275,9 @@ def install(names: list[str]) -> None:
                 install_package(name, explicit=False, specifier=specifiers.get(name))
 
 
-def uninstall(names: list[str]) -> None:
+def uninstall(
+    names: Annotated[list[str], doctyper.Argument(autocompletion=complete_installed)],
+) -> None:
     """Uninstalls packages; their dependencies stay until `autoremove`.
 
     Args:
@@ -1278,7 +1294,9 @@ def autoremove() -> None:
             uninstall_packages(orphans)
 
 
-def upgrade(names: Annotated[list[str] | None, doctyper.Argument()] = None) -> None:
+def upgrade(
+    names: Annotated[list[str] | None, doctyper.Argument(autocompletion=complete_installed)] = None,
+) -> None:
     """Upgrades packages to their latest release.
 
     Args:
@@ -1315,7 +1333,7 @@ def print_schema() -> None:
     print(msgspec.json.format(msgspec.json.encode(msgspec.json.schema(Package))).decode())  # noqa: T201
 
 
-def use(name: str) -> None:
+def use(name: Annotated[str, doctyper.Argument(autocompletion=complete_installed)]) -> None:
     """Makes a version the one the plain command names, man pages, and completions link to.
 
     Args:

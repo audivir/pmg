@@ -737,6 +737,27 @@ def test_registry(env: Env) -> None:
     assert env.run_bin("tool") == "registry 2.0"
 
 
+def test_completions(env: Env) -> None:
+    env.add_package("tool", version="1.0")
+    env.add_package("other")
+    env.pmg("install", "tool@v1.0")
+
+    def complete(line: str) -> str:
+        env_vars = clean_environ(env.home) | {
+            "PMG_HOME": str(env.pmg_home),
+            "PMG_SPECS_DIR": str(env.specs),
+            "_PMG_COMPLETE": "complete_zsh",
+            "_TYPER_COMPLETE_ARGS": line,
+        }
+        return subprocess.check_output([sys.executable, "-m", "pmg"], env=env_vars, text=True)
+
+    # install completes the specs, uninstall the installed packages and their versions
+    assert '"other"' in complete("pmg install ot")
+    assert '"tool"' in complete("pmg uninstall t")
+    assert '"tool@v1.0"' in complete("pmg uninstall t")
+    assert "other" not in complete("pmg uninstall ")
+
+
 def test_schema(env: Env) -> None:
     schema = json.loads(env.pmg("schema").stdout)
     assert set(schema["$defs"]["Package"]["required"]) == {"release", "download", "external"}

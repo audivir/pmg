@@ -131,6 +131,9 @@ eval "$(python -m pmg env)"
 - `list` shows each installed version, whether it was installed directly or as a dependency, and
   whether it is active.
 - Set `PMG_GH_TOKEN` (or `GH_TOKEN`) to avoid the rate limit of the GitHub API.
+- `_PMG_COMPLETE=source_zsh python -m pmg` prints the zsh completion script, which completes
+  commands, specs, and installed packages. It calls pmg as `pmg`, so that command must be in
+  `PATH`, e.g. as a script running `python -m pmg "$@"`.
 - `PMG_ALPINE_MIRROR`, `PMG_CONDA_API`, and `PMG_CONDA_URL` replace the Alpine mirror, the
   anaconda.org API, and the conda download server. Their indexes are cached for an hour in
   `$XDG_CACHE_HOME/pmg`.
