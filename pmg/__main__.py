@@ -57,8 +57,15 @@ def main() -> None:
     app.command("completion")(print_completion)
     app.command("version")(print_version)
     app.command()(validate)
-    # completions call the program pmg, also when started as python -m pmg
-    app(prog_name="pmg")
+    # completions call the program pmg, also when started as python -m pmg; any error ends in a
+    # single line instead of a traceback, e.g. a failed download, and doctyper exits with 130 on
+    # an interrupt itself
+    try:
+        app(prog_name="pmg")
+    except Exception as e:  # noqa: BLE001
+        lines = str(e).splitlines()
+        logger.error("error: %s", lines[0] if lines else type(e).__name__)  # noqa: TRY400
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

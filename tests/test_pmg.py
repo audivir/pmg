@@ -815,6 +815,39 @@ def test_spec_commands_get_certificates_without_system_ones(
     assert output.split() == [certifi.where(), certifi.where()]
 
 
+def test_errors_show_no_traceback(env: Env) -> None:
+    # the test server has no registry, so downloading it fails with a 404
+    stderr = env.pmg("install", "z*", ok=False).stderr
+    assert "Traceback" not in stderr
+    assert stderr.startswith("error: Client error '404")
+    assert len(stderr.splitlines()) == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "code", "messages"),
+    [(KeyboardInterrupt(), 130, []), (OSError(), 1, ["error: OSError"])],
+)
+def test_interrupts_and_errors_without_a_message_exit_quietly(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    error: BaseException,
+    code: int,
+    messages: list[str],
+) -> None:
+    import pmg.__main__
+    import pmg.cli
+
+    def raise_error() -> None:
+        raise error
+
+    monkeypatch.setattr(pmg.cli, "print_version", raise_error)
+    monkeypatch.setattr(sys, "argv", ["pmg", "version"])
+    with pytest.raises(SystemExit) as exit_info:
+        pmg.__main__.main()
+    assert exit_info.value.code == code
+    assert caplog.messages == messages
+
+
 def test_failed_package_skips_only_its_dependents(env: Env) -> None:
     env.add_package("fine")
     env.add_package("broken", post_install="exit 1")
