@@ -185,6 +185,13 @@ def list_installed() -> None:
         print(" ".join(words))  # noqa: T201
 
 
+def print_version() -> None:
+    """Prints the version of pmg, which is its tag without the leading v."""
+    from pmg import __version__
+
+    print(__version__)  # noqa: T201
+
+
 def print_completion() -> None:
     """Prints the zsh completion of pmg, which pmg also writes next to the other completions."""
     print(ZSH_COMPLETION, end="")  # noqa: T201

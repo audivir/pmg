@@ -789,6 +789,13 @@ def test_spec_commands_get_certificates_without_system_ones(
     assert output.split() == [certifi.where(), certifi.where()]
 
 
+def test_version(env: Env) -> None:
+    from pmg import __version__
+
+    assert env.pmg("version").stdout == f"{__version__}\n"
+    assert not __version__.startswith("v")
+
+
 def test_search(env: Env) -> None:
     # the registry has "tool", which a missing registry downloads for the search
     write_registry(env, "1.0")
