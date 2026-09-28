@@ -55,11 +55,23 @@ def install(
     """Installs packages and their dependencies.
 
     Args:
-        names: Names of the packages to install, each optionally with a release tag as name@tag.
+        names: Names of the packages to install, each optionally with a release tag as name@tag,
+            or globs like "zst*" matching the names of specs.
     """
-    from pmg.core import exit_on_error, install_package, needed_packages, resolve_install_order
+    from pmg.core import (
+        ensure_registry,
+        exit_on_error,
+        expand_globs,
+        install_package,
+        is_glob,
+        needed_packages,
+        resolve_install_order,
+    )
 
     with exit_on_error():
+        if any(is_glob(arg) for arg in names):
+            ensure_registry()
+            names = expand_globs(names, available_specs())
         requested: dict[str, list[str | None]] = {}
         for arg in names:
             name, _, tag = arg.partition("@")
@@ -80,10 +92,14 @@ def uninstall(
     """Uninstalls packages; their dependencies stay until `autoremove`.
 
     Args:
-        names: Names of the packages to uninstall with all their versions, or name@tag for one.
+        names: Names of the packages to uninstall with all their versions, name@tag for one, or
+            globs like "zst*" matching the names of installed packages.
     """
+    from pmg.core import expand_globs
+
     with exit_on_error():
-        uninstall_packages(names)
+        installed = {record.name for record in load_records().values()}
+        uninstall_packages(expand_globs(names, installed))
 
 
 def autoremove() -> None:
@@ -115,12 +131,14 @@ def upgrade(
     """Upgrades packages to their latest release.
 
     Args:
-        names: Names of the packages to upgrade, all installed ones if none are given.
+        names: Names of the packages to upgrade, or globs like "zst*" matching the names of
+            installed packages; all installed ones if none are given.
     """
-    from pmg.core import exit_on_error, load_records, upgrade_package
+    from pmg.core import exit_on_error, expand_globs, load_records, upgrade_package
 
     with exit_on_error():
-        for name in sorted(set(names or (record.name for record in load_records().values()))):
+        installed = {record.name for record in load_records().values()}
+        for name in sorted(set(expand_globs(names, installed) if names else installed)):
             upgrade_package(name)
 
 

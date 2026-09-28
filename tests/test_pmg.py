@@ -789,6 +789,26 @@ def test_spec_commands_get_certificates_without_system_ones(
     assert output.split() == [certifi.where(), certifi.where()]
 
 
+def test_globs(env: Env) -> None:
+    # the registry has "tool", which a missing registry downloads for a glob
+    write_registry(env, "1.0")
+    for name in ("zstd", "zstd-extra", "zq"):
+        env.add_package(name)
+    env.pmg("install", "ZST*", "zq")
+    assert set(env.installed()) == {"zstd@v1.0", "zstd-extra@v1.0", "zq@v1.0"}
+    env.pmg("install", "t??l")
+    assert "tool@v1.0" in env.installed()
+    # globs match installed packages for upgrade and uninstall
+    env.pmg("upgrade", "zst*")
+    env.pmg("uninstall", "zstd-*", "t*")
+    assert set(env.installed()) == {"zstd@v1.0", "zq@v1.0"}
+    # a plain name matches only itself
+    assert "no spec for zst " in env.pmg("install", "zst", ok=False).stderr
+    assert "no package matches x*" in env.pmg("uninstall", "x*", ok=False).stderr
+    assert "no package matches x*" in env.pmg("upgrade", "x*", ok=False).stderr
+    assert "a glob cannot have a tag: zst*@v1.0" in env.pmg("install", "zst*@v1.0", ok=False).stderr
+
+
 def test_version(env: Env) -> None:
     from pmg import __version__
 

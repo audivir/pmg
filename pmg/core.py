@@ -33,7 +33,7 @@ from urllib.parse import urlsplit
 from pmg.packaging_utils import requirements, tag_version
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Generator, Iterable
 
     import jinja2
     from _typeshed import StrPath
@@ -109,22 +109,58 @@ def available_specs() -> dict[str, Path]:
     return specs
 
 
+def ensure_registry() -> None:
+    """Downloads the registry on the first use of pmg."""
+    if not registry_dir().exists():
+        update_registry()
+
+
+def is_glob(pattern: str) -> bool:
+    """Checks whether a pattern is a glob, i.e. has `*`, `?`, or `[`."""
+    return any(char in pattern for char in "*?[")
+
+
+def glob_names(pattern: str, names: Iterable[str]) -> list[str]:
+    """Returns the names the glob matches as a whole, ignoring case."""
+    import fnmatch
+
+    return [name for name in names if fnmatch.fnmatchcase(name.lower(), pattern.lower())]
+
+
 def search_specs(pattern: str | None) -> list[str]:
     """Returns the names of the packages with a spec matching the pattern, ignoring case.
 
-    A pattern with `*`, `?`, or `[` is a glob matching the whole name, any other a part of it;
-    without a pattern, all names. The first use of pmg downloads the registry.
+    A glob matches the whole name, any other pattern a part of it; without a pattern, all names
+    match. The first use of pmg downloads the registry.
     """
-    import fnmatch
-
-    if not registry_dir().exists():
-        update_registry()
+    ensure_registry()
     if pattern is None:
         return list(available_specs())
-    pattern = pattern.lower()
-    if any(char in pattern for char in "*?["):
-        return [name for name in available_specs() if fnmatch.fnmatchcase(name.lower(), pattern)]
-    return [name for name in available_specs() if pattern in name.lower()]
+    if is_glob(pattern):
+        return glob_names(pattern, available_specs())
+    return [name for name in available_specs() if pattern.lower() in name.lower()]
+
+
+def expand_globs(args: list[str], names: Iterable[str]) -> list[str]:
+    """Replaces the globs among name or name@tag arguments by the names they match, sorted.
+
+    Raises:
+        PmgError: If a glob has a tag or matches no name.
+    """
+    names = list(names)
+    expanded: list[str] = []
+    for arg in args:
+        name, _, tag = arg.partition("@")
+        if not is_glob(name):
+            expanded.append(arg)
+            continue
+        if tag:
+            raise PmgError(f"a glob cannot have a tag: {arg}")
+        if not (matches := glob_names(name, names)):
+            raise PmgError(f"no package matches {arg}")
+        expanded += sorted(matches)
+    # a name both given and matched by a glob counts once
+    return list(dict.fromkeys(expanded))
 
 
 def layout() -> dict[str, Path]:
