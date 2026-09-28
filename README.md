@@ -11,7 +11,7 @@ works without admin rights.
 ## Installation
 
 ```bash
-pip install pmg
+pip install git+https://github.com/audivir/pmg
 ```
 
 ## Usage
