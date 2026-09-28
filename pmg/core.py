@@ -1216,7 +1216,16 @@ def upgrade_package(name: str) -> None:
 
 
 def complete_available(incomplete: str) -> list[str]:
-    """Completes the names of the packages with a spec."""
+    """Completes the names of the packages with a spec, downloading the registry if missing."""
+    if not registry_dir().exists():
+        # quietly, as the output would land in the middle of the command line
+        level = logger.level
+        logger.setLevel(logging.WARNING)
+        try:
+            with contextlib.suppress(Exception):
+                update_registry()
+        finally:
+            logger.setLevel(level)
     return [name for name in available_specs() if name.startswith(incomplete)]
 
 

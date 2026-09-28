@@ -752,11 +752,19 @@ def test_completions(env: Env) -> None:
             "PMG_SPECS_DIR": str(env.specs),
             "_PMG_COMPLETE": "complete_zsh",
             "_TYPER_COMPLETE_ARGS": line,
+            "PMG_REGISTRY_URL": f"{env.base_url}/registry.tar.gz",
         }
         return subprocess.check_output([sys.executable, "-m", "pmg"], env=env_vars, text=True)
 
     # install completes the specs, uninstall the installed packages and their versions
     assert '"other"' in complete("pmg install ot")
+    # a missing registry is downloaded for it
+    write_registry(env, "1.0")
+    shutil.rmtree(env.pmg_home / "registry", ignore_errors=True)
+    registry_completion = complete("pmg install to")
+    assert '"tool"' in registry_completion
+    assert "updated the specs" not in registry_completion
+    assert complete("pmg install to") == registry_completion
     assert '"tool"' in complete("pmg uninstall t")
     assert '"tool@v1.0"' in complete("pmg uninstall t")
     assert "other" not in complete("pmg uninstall ")
