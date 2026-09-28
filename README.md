@@ -11,8 +11,10 @@ works without admin rights.
 ## Installation
 
 ```bash
-pip install git+https://github.com/audivir/pmg
+uv tool install git+https://github.com/audivir/pmg
 ```
+
+Or run it without installing, with `uvx --from git+https://github.com/audivir/pmg pmg`.
 
 ## Usage
 
@@ -100,15 +102,15 @@ specs, which a first line like `#:schema https://raw.githubusercontent.com/audiv
 hands to editors and `taplo check`.
 
 ```bash
-python -m pmg install bat
-python -m pmg install bat@v0.25.0
-python -m pmg use bat@v0.25.0
-python -m pmg list
-python -m pmg uninstall bat@v0.25.0
-python -m pmg update
-python -m pmg upgrade
-python -m pmg autoremove
-eval "$(python -m pmg env)"
+pmg install bat
+pmg install bat@v0.25.0
+pmg use bat@v0.25.0
+pmg list
+pmg uninstall bat@v0.25.0
+pmg update
+pmg upgrade
+pmg autoremove
+eval "$(pmg env)"
 ```
 
 - `install` installs the latest release. `name@tag` installs the release with that tag, written as
@@ -135,9 +137,8 @@ eval "$(python -m pmg env)"
 - `list` shows each installed version, whether it was installed directly or as a dependency, and
   whether it is active.
 - Set `PMG_GH_TOKEN` (or `GH_TOKEN`) to avoid the rate limit of the GitHub API.
-- `_PMG_COMPLETE=source_zsh python -m pmg` prints the zsh completion script, which completes
-  commands, specs, and installed packages. It calls pmg as `pmg`, so that command must be in
-  `PATH`, e.g. as a script running `python -m pmg "$@"`.
+- `_PMG_COMPLETE=source_zsh pmg` prints the zsh completion script, which completes commands,
+  specs, and installed packages.
 - `PMG_ALPINE_MIRROR`, `PMG_CONDA_API`, and `PMG_CONDA_URL` replace the Alpine mirror, the
   anaconda.org API, and the conda download server. Their indexes are cached for an hour in
   `$XDG_CACHE_HOME/pmg`.

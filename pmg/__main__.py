@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-if __name__ == "__main__":
+
+def main() -> None:
+    """Runs the pmg command line, the entry point of the pmg command."""
     import logging
 
     import doctyper
@@ -35,5 +37,9 @@ if __name__ == "__main__":
     app.command("env")(print_env)
     app.command()(external)
     app.command("list")(list_installed)
-    # completions call the program pmg, not python -m pmg
+    # completions call the program pmg, also when started as python -m pmg
     app(prog_name="pmg")
+
+
+if __name__ == "__main__":
+    main()

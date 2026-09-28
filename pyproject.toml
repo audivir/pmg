@@ -27,6 +27,9 @@ dependencies = [
   "zstandard",
 ]
 
+[project.scripts]
+pmg = "pmg.__main__:main"
+
 [project.optional-dependencies]
 
 [project.urls]
