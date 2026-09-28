@@ -28,6 +28,9 @@ jobs:
         python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v7
+      # the test of the zsh completion runs it in zsh, which the Linux runners lack
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install --yes --no-install-recommends zsh
       - uses: astral-sh/setup-uv@v10.0.1
         with:
           python-version: ${{ matrix.python-version }}
