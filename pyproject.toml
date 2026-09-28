@@ -18,6 +18,7 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "certifi",
   "doctyper",
   "jinja2",
   "msgspec",

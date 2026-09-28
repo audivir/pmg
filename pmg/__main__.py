@@ -9,6 +9,7 @@ if __name__ == "__main__":
 
     from pmg.core import (
         autoremove,
+        external,
         install,
         list_installed,
         logger,
@@ -32,6 +33,7 @@ if __name__ == "__main__":
     app.command()(update)
     app.command("schema")(print_schema)
     app.command("env")(print_env)
+    app.command()(external)
     app.command("list")(list_installed)
     # completions call the program pmg, not python -m pmg
     app(prog_name="pmg")

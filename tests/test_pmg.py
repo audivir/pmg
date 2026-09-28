@@ -160,6 +160,7 @@ class Env:
         spec: tuple[str, ...] = (),
         bin_entry: bool = True,
         check: str | None = None,
+        external: tuple[str, ...] = (),
     ) -> None:
         script_bytes = (script or f"#!/bin/sh\necho {name} {version}\n").encode()
         if archive_format in {"tar.gz", "tar.zst"}:
@@ -197,6 +198,7 @@ class Env:
             lines.append(f'min_glibc = "{min_glibc}"')
         lines += [
             "[external]",
+            *external,
             "[release]",
             release or f'type = "static"\ntag = "v{version}"',
             "[download]",
@@ -618,6 +620,8 @@ def test_env_and_paths(env: Env) -> None:
     package_dir = env.data / "tool@v1.0"
     output = env.pmg("env").stdout
     assert output == f'export TOOL_HOME={package_dir}\nexport PATH={package_dir}/bin:"$PATH"\n'
+    # shells source this file instead of running pmg
+    assert (env.pmg_home / "env.sh").read_text() == output
     # the printed code sets up a shell that finds the command
     shell = subprocess.run(  # noqa: S603
         ["/bin/sh", "-c", f'{output}tool && echo "$TOOL_HOME"'],
@@ -756,6 +760,11 @@ def test_completions(env: Env) -> None:
     assert '"tool"' in complete("pmg uninstall t")
     assert '"tool@v1.0"' in complete("pmg uninstall t")
     assert "other" not in complete("pmg uninstall ")
+
+
+def test_external_names(env: Env) -> None:
+    env.add_package("tool", external=('brew = "tool-brew"', 'apt = "tool-apt"'))
+    assert env.pmg("external", "tool").stdout == "brew tool-brew\napt tool-apt\n"
 
 
 def test_schema(env: Env) -> None:

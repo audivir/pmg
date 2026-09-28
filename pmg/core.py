@@ -24,6 +24,7 @@ import platform
 import re
 import shlex
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -34,6 +35,7 @@ from pathlib import Path
 from typing import IO, TYPE_CHECKING, Annotated
 from urllib.parse import urlsplit
 
+import certifi
 import doctyper
 import jinja2
 import msgspec
@@ -305,6 +307,14 @@ def detect_platform(min_glibc: Version | None) -> Platform:
 
 
 @functools.cache
+def system_certificates() -> bool:
+    """Checks whether the host has CA certificates where OpenSSL looks for them."""
+    paths = ssl.get_default_verify_paths()
+    capath = Path(paths.openssl_capath)
+    return Path(paths.openssl_cafile).is_file() or (capath.is_dir() and any(capath.iterdir()))
+
+
+@functools.cache
 def spec_shell() -> str:
     """Returns the shell for spec commands.
 
@@ -341,6 +351,12 @@ def run_shell(
         env={
             **os.environ,
             "PATH": f"{layout()['bin']}{os.pathsep}{os.getenv('PATH', '')}",
+            # the certificates pmg downloads with, for hosts without their own
+            **(
+                {}
+                if system_certificates()
+                else {"CURL_CA_BUNDLE": certifi.where(), "SSL_CERT_FILE": certifi.where()}
+            ),
             **(env or {}),
         },
     )
@@ -1213,12 +1229,14 @@ def complete_installed(incomplete: str) -> list[str]:
 
 @contextlib.contextmanager
 def exit_on_error() -> Generator[None]:
-    """Logs a `PmgError` and exits with code 1."""
+    """Logs a `PmgError` and exits with code 1, and updates the env file either way."""
     try:
         yield
     except PmgError as e:
         logger.error("error: %s", e)  # noqa: TRY400
         raise SystemExit(1) from e
+    finally:
+        write_env_file()
 
 
 def needs_installing(
@@ -1307,19 +1325,48 @@ def upgrade(
             upgrade_package(name)
 
 
-def print_env() -> None:
-    """Prints shell code setting the environment and PATH entries of the active versions."""
+def env_code() -> str:
+    """Returns shell code setting the environment and PATH entries of the active versions."""
+    lines: list[str] = []
     paths: list[str] = []
     for record in load_records().values():
         if not record.active or record.name not in available_specs():
             continue
         pkg = load_spec(record.name)
         context = make_context(record.name, pkg, record.tag)
-        for key, value in package_env(pkg, context).items():
-            print(f"export {key}={shlex.quote(value)}")  # noqa: T201
+        lines += [
+            f"export {key}={shlex.quote(value)}" for key, value in package_env(pkg, context).items()
+        ]
         paths += [render(path, context) for path in pkg.paths]
     if paths:
-        print(f'export PATH={shlex.quote(os.pathsep.join(paths))}:"$PATH"')  # noqa: T201
+        lines.append(f'export PATH={shlex.quote(os.pathsep.join(paths))}:"$PATH"')
+    return "".join(f"{line}\n" for line in lines)
+
+
+def write_env_file() -> None:
+    """Writes the code of `pmg env` to `$PMG_HOME/env.sh`, for shells to source without pmg."""
+    path = pmg_home() / "env.sh"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".sh.tmp")
+    tmp_path.write_text(env_code())
+    tmp_path.replace(path)
+
+
+def print_env() -> None:
+    """Prints shell code setting the environment and PATH entries of the active versions."""
+    print(env_code(), end="")  # noqa: T201
+
+
+def external(name: Annotated[str, doctyper.Argument(autocompletion=complete_available)]) -> None:
+    """Prints the names of a package in system package managers, as "manager name" lines.
+
+    Args:
+        name: Name of the package.
+    """
+    with exit_on_error():
+        for manager, package in msgspec.structs.asdict(load_spec(name).external).items():
+            if package:
+                print(f"{manager} {package}")  # noqa: T201
 
 
 def update() -> None:
