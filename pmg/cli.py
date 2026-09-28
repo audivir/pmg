@@ -51,6 +51,7 @@ def complete_installed(incomplete: str) -> list[str]:
 
 def install(
     names: Annotated[list[str], doctyper.Argument(autocompletion=complete_available)],
+    no_external: Annotated[bool, doctyper.Option("--no-external")] = False,
 ) -> None:
     """Installs packages and their dependencies.
 
@@ -60,6 +61,8 @@ def install(
     Args:
         names: Names of the packages to install, each optionally with a release tag as name@tag,
             or globs like "zst*" matching the names of specs, skipping those not for the host.
+        no_external: Install the packages even if a version outside pmg, e.g. of the system, is
+            there; their dependencies may still be external.
     """
     from pmg.core import (
         PmgError,
@@ -92,7 +95,7 @@ def install(
             name, _, tag = arg.partition("@")
             requested.setdefault(name, []).append(tag or None)
         order, specifiers = resolve_install_order(list(requested))
-        needed = needed_packages(requested, order, specifiers)
+        needed = needed_packages(requested, order, specifiers, external=not no_external)
         failed: list[str] = []
         for name in (name for name in order if name in needed):
             if broken := sorted(dep_names(name) & set(failed)):
@@ -101,7 +104,9 @@ def install(
                 continue
             try:
                 for requested_tag in requested.get(name, []):
-                    install_package(name, explicit=True, tag=requested_tag)
+                    install_package(
+                        name, explicit=True, tag=requested_tag, external=not no_external
+                    )
                 # dependencies, or requested packages whose dependents need other versions
                 if name not in requested or name in specifiers:
                     install_package(name, explicit=False, specifier=specifiers.get(name))

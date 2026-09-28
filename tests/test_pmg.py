@@ -1014,6 +1014,22 @@ def test_external_package_found_by_name(env: Env) -> None:
     assert env.installed() == {"tool@external": "explicit external 2.0"}
 
 
+def test_no_external_installs_the_requested_package_itself(env: Env) -> None:
+    # app and base are on the system; only app is requested, so base stays external
+    env.add_system_command("app", "app 2.0")
+    env.add_system_command("base", "base 3.0")
+    env.add_package("app", deps=("lib",))
+    env.add_package("lib", deps=("base",))
+    env.add_package("base")
+    env.pmg("install", "--no-external", "app")
+    assert env.installed() == {
+        "app@v1.0": "explicit active",
+        "lib@v1.0": "dependency active",
+        "base@external": "dependency external 3.0",
+    }
+    assert env.run_bin("app") == "app 1.0"
+
+
 def test_external_package_pulls_in_no_dependencies(env: Env) -> None:
     env.add_system_command("app", "app 2.0")
     env.add_package("lib")

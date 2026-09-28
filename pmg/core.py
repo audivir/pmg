@@ -1141,8 +1141,11 @@ def nothing_to_install(  # noqa: PLR0913, PLR0917
     tag: str | None,
     specifier: SpecifierSet,
     record_external: bool = True,
+    external: bool = True,
 ) -> bool:
     """Checks whether the package is not for the host, or an installed or external one is enough.
+
+    An external one only counts if `external` is set.
 
     Raises:
         PmgError: If the package was requested directly but is not for the host.
@@ -1155,11 +1158,15 @@ def nothing_to_install(  # noqa: PLR0913, PLR0917
         return False
     if not explicit and any(satisfies(r.version_tag, specifier) for r in versions):
         return True
-    return use_external(name, pkg, versions, explicit, specifier, record_external)
+    return external and use_external(name, pkg, versions, explicit, specifier, record_external)
 
 
 def install_package(
-    name: str, explicit: bool, tag: str | None = None, specifier: SpecifierSet | None = None
+    name: str,
+    explicit: bool,
+    tag: str | None = None,
+    specifier: SpecifierSet | None = None,
+    external: bool = True,
 ) -> None:
     """Installs a version of a package without its dependencies.
 
@@ -1171,6 +1178,7 @@ def install_package(
         explicit: Whether the package was requested directly.
         tag: Release tag to install instead of the latest one.
         specifier: Versions its dependents accept; an installed one satisfies a dependency.
+        external: Whether a version found outside pmg is enough.
 
     Raises:
         PmgError: If the package is not for the host, or its latest release does not meet the
@@ -1185,7 +1193,7 @@ def install_package(
     pkg = load_spec(name)
     host = detect_platform(pkg.min_glibc_version)
     versions = [record for record in records.values() if record.name == name]
-    if nothing_to_install(name, pkg, host, versions, explicit, tag, specifier):
+    if nothing_to_install(name, pkg, host, versions, explicit, tag, specifier, external=external):
         return
     current = active_version(records, name)
     should_activate = tag is None or current is None
@@ -1365,14 +1373,14 @@ def exit_on_error() -> Generator[None]:
 
 
 def needs_installing(
-    name: str, tags: list[str | None], explicit: bool, specifier: SpecifierSet
+    name: str, tags: list[str | None], explicit: bool, specifier: SpecifierSet, external: bool
 ) -> bool:
     """Checks whether installing may add a version of the package, without recording anything."""
     pkg = load_spec(name)
     host = detect_platform(pkg.min_glibc_version)
     versions = [record for record in load_records().values() if record.name == name]
     return not all(
-        nothing_to_install(name, pkg, host, versions, explicit, tag, specifier, False)
+        nothing_to_install(name, pkg, host, versions, explicit, tag, specifier, False, external)
         for tag in tags
     )
 
@@ -1387,9 +1395,15 @@ def dep_names(name: str) -> set[str]:
 
 
 def needed_packages(
-    requested: dict[str, list[str | None]], order: list[str], specifiers: dict[str, SpecifierSet]
+    requested: dict[str, list[str | None]],
+    order: list[str],
+    specifiers: dict[str, SpecifierSet],
+    external: bool = True,
 ) -> set[str]:
-    """Returns the requested packages and the dependencies of those that get installed."""
+    """Returns the requested packages and the dependencies of those that get installed.
+
+    Without `external`, versions found outside pmg do not count for the requested packages.
+    """
     from packaging.specifiers import SpecifierSet
 
     needed = set(requested)
@@ -1398,7 +1412,11 @@ def needed_packages(
     for name in reversed(order):
         tags = requested.get(name, [None])
         if name in needed and needs_installing(
-            name, tags, name in requested, specifiers.get(name, SpecifierSet())
+            name,
+            tags,
+            name in requested,
+            specifiers.get(name, SpecifierSet()),
+            external or name not in requested,
         ):
             spec = load_spec(name)
             deps = package_deps(spec, detect_platform(spec.min_glibc_version))
