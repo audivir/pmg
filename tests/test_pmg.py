@@ -6,7 +6,6 @@ Set PMG_OFFLINE=1 to skip the test that installs bat from GitHub.
 from __future__ import annotations
 
 import ctypes.util
-import dataclasses
 import functools
 import gzip
 import hashlib
@@ -24,6 +23,7 @@ import zipfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypeAlias, override
 
+import msgspec
 import pytest
 import zstandard
 
@@ -104,8 +104,7 @@ def server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[tuple[str, Path
     httpd.server_close()
 
 
-@dataclasses.dataclass
-class Env:
+class Env(msgspec.Struct):
     root: Path
     base_url: str
     assets: Path
