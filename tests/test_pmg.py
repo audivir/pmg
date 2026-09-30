@@ -724,6 +724,23 @@ def test_dependency_template_variables(env: Env, external: bool) -> None:
     assert info == (" 3.1\n" if external else f"{env.packages / 'lib@v1.0'} v1.0\n")
 
 
+def test_env_with_dependencies(env: Env) -> None:
+    # like the library path of rustup, which only musl hosts get from musl-libs; a variable that
+    # renders empty is not set, so it cannot clear one of the shell
+    env.add_package("lib", spec=("content = true",))
+    env.add_package(
+        "app",
+        deps=("lib",),
+        spec=(
+            'env = { APP_LIBS = "{{ deps.lib.dir }}/lib", APP_EMPTY = "" }',
+            """uninstall = 'test "$APP_LIBS" = "{{ deps.lib.dir }}/lib"'""",
+        ),
+    )
+    env.pmg("install", "app")
+    assert env.pmg("env").stdout == f"export APP_LIBS={env.packages / 'lib@v1.0'}/lib\n"
+    env.pmg("uninstall", "app")
+
+
 def test_upgrade_replaces_active_version(env: Env) -> None:
     env.add_package("tool", version="1.0")
     env.pmg("install", "tool")

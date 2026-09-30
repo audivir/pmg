@@ -766,8 +766,16 @@ def stage_files(
 
 
 def package_env(pkg: Package, context: Context) -> dict[str, str]:
-    """Renders the environment of the package."""
-    return {key: render(value, context) for key, value in pkg.env.items()}
+    """Renders the environment of the package, without the variables that render empty."""
+    env = {key: render(value, context) for key, value in pkg.env.items()}
+    return {key: value for key, value in env.items() if value}
+
+
+def installed_context(record: Record, pkg: Package, records: dict[str, Record]) -> Context:
+    """Resolves the template variables of an installed version, with its dependencies."""
+    context = make_context(record.name, pkg, record.tag)
+    context.deps = dependency_vars(pkg, detect_platform(pkg.min_glibc_version), records)
+    return context
 
 
 def staged_context(context: Context, target: Path) -> Context:
@@ -1298,7 +1306,7 @@ def uninstall_version(record: Record) -> None:
     pkg = load_spec(record.name) if record.name in available_specs() else None
     # external versions only lose their record
     if pkg and pkg.uninstall and not record.external:
-        context = make_context(record.name, pkg, record.tag)
+        context = installed_context(record, pkg, load_records())
         env = package_env(pkg, context)
         run_shell(record.name, "uninstall", render(pkg.uninstall, context), env=env)
     if record.active:
@@ -1389,7 +1397,7 @@ def upgrade_package(name: str) -> None:
     if active is None:
         return
     pkg = load_spec(name)
-    context = make_context(name, pkg, active.tag)
+    context = installed_context(active, pkg, records)
     if pkg.upgrade:
         run_shell(name, "upgrade", render(pkg.upgrade, context), env=package_env(pkg, context))
         logger.info("upgraded %s in place", name)
@@ -1477,11 +1485,12 @@ def env_code() -> str:
 
     lines: list[str] = []
     paths: list[str] = []
-    for record in load_records().values():
+    records = load_records()
+    for record in records.values():
         if not record.active or record.name not in available_specs():
             continue
         pkg = load_spec(record.name)
-        context = make_context(record.name, pkg, record.tag)
+        context = installed_context(record, pkg, records)
         lines += [
             f"export {key}={shlex.quote(value)}" for key, value in package_env(pkg, context).items()
         ]
