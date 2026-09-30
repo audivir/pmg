@@ -727,19 +727,33 @@ def test_dependency_template_variables(env: Env, external: bool) -> None:
 
 
 def test_env_with_dependencies(env: Env) -> None:
-    # like the library path of rustup, which only musl hosts get from musl-libs; a variable that
-    # renders empty is not set, so it cannot clear one of the shell
+    # like the library path of rustup, which only musl hosts get from musl-libs; what renders
+    # empty is not set, so it cannot clear a variable of the shell
     env.add_package("lib", spec=("content = true",))
     env.add_package(
         "app",
         deps=("lib",),
         spec=(
-            'env = { APP_LIBS = "{{ deps.lib.dir }}/lib", APP_EMPTY = "" }',
+            'env = { APP_HOME = "{{ deps.lib.dir }}", APP_EMPTY = "" }',
+            'prepend = { APP_LIBS = ["{{ deps.lib.dir }}/lib", ""], APP_NONE = [""] }',
             """uninstall = 'test "$APP_LIBS" = "{{ deps.lib.dir }}/lib"'""",
         ),
     )
     env.pmg("install", "app")
-    assert env.pmg("env").stdout == f"export APP_LIBS={env.packages / 'lib@v1.0'}/lib\n"
+    lib = env.packages / "lib@v1.0"
+    output = env.pmg("env").stdout
+    assert (
+        output == f'export APP_HOME={lib}\nexport APP_LIBS={lib}/lib"${{APP_LIBS:+:$APP_LIBS}}"\n'
+    )
+    # the entries go before a value of the shell
+    shell = subprocess.run(  # noqa: S603
+        ["/bin/sh", "-c", f'{output}echo "$APP_LIBS"'],
+        env={"APP_LIBS": "/old"},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert shell.stdout == f"{lib}/lib:/old\n"
     env.pmg("uninstall", "app")
 
 

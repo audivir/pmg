@@ -204,6 +204,9 @@ class Package(BaseStruct, kw_only=True):
     """
     paths: list[str] = []
     """PATH entries printed by `pmg env`, e.g. for commands the package installs itself."""
+    prepend: dict[str, list[str]] = {}
+    """Entries put before the value of path-like variables like LD_LIBRARY_PATH, for the spec
+    commands and, printed by `pmg env`, for the shell; entries that render empty are left out."""
 
     def __post_init__(self) -> None:
         """Validates deps, `min_glibc`, and the test, and takes the download repo from the release.

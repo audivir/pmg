@@ -84,6 +84,9 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
   the shell through `pmg env`. During an install, `{{ dir }}` and `{{ dirs.<key> }}` point to the
   staging directory there. A variable that renders empty is not set, e.g. one only for the
   platforms that use a dependency.
+- `prepend` puts entries before the value of path-like variables, like `paths` for `PATH`, e.g.
+  `prepend = { LD_LIBRARY_PATH = ["{{ dir }}/lib"] }`, for the spec commands and `pmg env`, which
+  keeps a value of the shell. Entries that render empty are left out.
 - `deps` entries can have environment markers like `"lib; sys_platform == 'linux'"`. In
   templates, `{{ deps["lib"].dir }}` and `{{ deps["lib"].version }}` are the package directory and
   version of a dependency in use, the directory is empty for an external one.

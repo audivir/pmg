@@ -243,6 +243,16 @@
             "type": "string"
           },
           "default": []
+        },
+        "prepend": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "default": {}
         }
       },
       "required": [

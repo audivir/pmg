@@ -771,6 +771,23 @@ def package_env(pkg: Package, context: Context) -> dict[str, str]:
     return {key: value for key, value in env.items() if value}
 
 
+def prepended(pkg: Package, context: Context) -> dict[str, list[str]]:
+    """Renders the entries of the path-like variables, without those that render empty."""
+    rendered = {
+        key: [entry for entry in (render(value, context) for value in values) if entry]
+        for key, values in pkg.prepend.items()
+    }
+    return {key: entries for key, entries in rendered.items() if entries}
+
+
+def command_env(pkg: Package, context: Context) -> dict[str, str]:
+    """Returns the environment of the spec commands, with the entries before the current values."""
+    env = package_env(pkg, context)
+    for key, entries in prepended(pkg, context).items():
+        env[key] = os.pathsep.join([*entries, *filter(None, [os.getenv(key)])])
+    return env
+
+
 def installed_context(record: Record, pkg: Package, records: dict[str, Record]) -> Context:
     """Resolves the template variables of an installed version, with its dependencies."""
     context = make_context(record.name, pkg, record.tag)
@@ -799,7 +816,7 @@ def run_install(
     """
     from pmg.models import CommandDownload, GitHubDownload, UrlDownload
 
-    env = package_env(pkg, staged_context(context, target)) | {"PREFIX": str(target)}
+    env = command_env(pkg, staged_context(context, target)) | {"PREFIX": str(target)}
     if isinstance(pkg.download, CommandDownload):
         run_shell(name, "download command", render(pkg.download.cmd, context), target, env)
     content = target.parent / "unpacked"
@@ -1211,7 +1228,7 @@ def run_test(name: str, pkg: Package, context: Context, record: Record, work: Pa
     except jinja2.UndefinedError as e:  # pragma: no cover
         raise PmgError(f"the test of {name} uses a command it lacks: {e}") from e
     paths = [*(render(path, context) for path in pkg.paths), str(layout()["bin"])]
-    env = package_env(pkg, context) | {"PATH": os.pathsep.join([*paths, os.getenv("PATH", "")])}
+    env = command_env(pkg, context) | {"PATH": os.pathsep.join([*paths, os.getenv("PATH", "")])}
     run_shell(name, "test", test, work, env)
 
 
@@ -1307,7 +1324,7 @@ def uninstall_version(record: Record) -> None:
     # external versions only lose their record
     if pkg and pkg.uninstall and not record.external:
         context = installed_context(record, pkg, load_records())
-        env = package_env(pkg, context)
+        env = command_env(pkg, context)
         run_shell(record.name, "uninstall", render(pkg.uninstall, context), env=env)
     if record.active:
         unlink_active(record)
@@ -1399,7 +1416,7 @@ def upgrade_package(name: str) -> None:
     pkg = load_spec(name)
     context = installed_context(active, pkg, records)
     if pkg.upgrade:
-        run_shell(name, "upgrade", render(pkg.upgrade, context), env=package_env(pkg, context))
+        run_shell(name, "upgrade", render(pkg.upgrade, context), env=command_env(pkg, context))
         logger.info("upgraded %s in place", name)
         return
     latest = fetch_release(name, pkg, detect_platform(pkg.min_glibc_version))
@@ -1493,6 +1510,11 @@ def env_code() -> str:
         context = installed_context(record, pkg, records)
         lines += [
             f"export {key}={shlex.quote(value)}" for key, value in package_env(pkg, context).items()
+        ]
+        # before the value of the shell, which stays
+        lines += [
+            f'export {key}={shlex.quote(os.pathsep.join(entries))}"${{{key}:+:${key}}}"'
+            for key, entries in prepended(pkg, context).items()
         ]
         paths += [render(path, context) for path in pkg.paths]
     if paths:
