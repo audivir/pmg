@@ -21,7 +21,7 @@ dependencies = [
   "certifi",
   "doctyper",
   "jinja2",
-  "msgspec",
+  "msgspec>=0.22.0",
   "mxhttp",
   "packaging",
   "zstandard",
