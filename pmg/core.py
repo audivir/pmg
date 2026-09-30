@@ -1161,6 +1161,52 @@ def nothing_to_install(  # noqa: PLR0913, PLR0917
     return external and use_external(name, pkg, versions, explicit, specifier, record_external)
 
 
+def version_commands(pkg: Package, context: Context, record: Record) -> dict[str, Path]:
+    """Maps the plain names of the commands of an installed version to their files.
+
+    These are its commands in the versions bin, and the executables in its PATH entries.
+    """
+    commands: dict[str, Path] = {}
+    for file in map(Path, record.files):
+        if file.parent == versions_bin():
+            commands.setdefault(file.name.removesuffix(f"@{record.tag}"), file)
+    for entry in (Path(render(path, context)) for path in pkg.paths):
+        if entry.is_dir():
+            for file in sorted(entry.iterdir()):
+                if file.is_file() and os.access(file, os.X_OK):
+                    commands.setdefault(file.name, file)
+    return commands
+
+
+def run_test(name: str, pkg: Package, context: Context, record: Record, work: Path) -> None:
+    """Runs the test of an installed version, with {{ cmd }} and {{ cmds }} as its commands.
+
+    {{ cmd }} is the main command, the one named like the package or else the first of `bin` and
+    `links`; {{ cmds["<name>"] }} are all commands, also those in `paths`. They are links with the
+    plain names, as some commands only run under their own name.
+
+    Raises:
+        PmgError: If the test fails or uses a command the version lacks.
+    """
+    import jinja2
+
+    commands = version_commands(pkg, context, record)
+    links = work / "bin"
+    links.mkdir(parents=True)
+    for command, file in commands.items():
+        (links / command).symlink_to(file)
+    cmds = {command: str(links / command) for command in commands}
+    main = next((c for c in [name, *pkg.bin, *pkg.links] if c in cmds), next(iter(cmds), None))
+    extra = {"cmds": cmds} | ({"cmd": cmds[main]} if main else {})
+    try:
+        test = jinja_env().from_string(pkg.test).render(**context.variables(), **extra)
+    except jinja2.UndefinedError as e:  # pragma: no cover
+        raise PmgError(f"the test of {name} uses a command it lacks: {e}") from e
+    paths = [*(render(path, context) for path in pkg.paths), str(layout()["bin"])]
+    env = package_env(pkg, context) | {"PATH": os.pathsep.join([*paths, os.getenv("PATH", "")])}
+    run_shell(name, "test", test, work, env)
+
+
 def install_package(
     name: str,
     explicit: bool,
@@ -1230,6 +1276,7 @@ def install_package(
         dir_moves = [(path.relative_to(target), dest) for path, dest in dirs.items()]
         moved = move_data(target, [*moves, *dir_moves])
         try:
+            run_test(name, pkg, context, record, target.parent / "test")
             save_record(record)
             if should_activate:
                 activate(record, {**records, record.key: record})

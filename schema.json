@@ -64,6 +64,9 @@
             }
           }
         },
+        "test": {
+          "type": "string"
+        },
         "deps": {
           "type": "array",
           "items": {
@@ -245,6 +248,7 @@
       "required": [
         "release",
         "download",
+        "test",
         "external"
       ],
       "additionalProperties": false

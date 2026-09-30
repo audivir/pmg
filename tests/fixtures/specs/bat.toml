@@ -1,6 +1,7 @@
 min_glibc = "2.18"
 bin = { bat = "bat" }
 man = ["bat.1"]
+test = "{{ cmd }} --version"
 completions.bat = { zsh = "autocomplete/bat.zsh", bash = "autocomplete/bat.bash", fish = "autocomplete/bat.fish" }
 
 [external]

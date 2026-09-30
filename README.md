@@ -26,6 +26,7 @@ bin = { bat = "bat" }
 man = ["bat.1"]
 completions.bat = { zsh = "autocomplete/bat.zsh", bash = "autocomplete/bat.bash" }
 check = {}
+test = "{{ cmd }} --version"
 
 [external]
 brew = "bat"
@@ -68,6 +69,12 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
   satisfies dependencies and is only recorded, pmg leaves its files alone. `dev_tool = true` marks
   commands that macOS ships as stubs in `/usr/bin` (`cc`, `git`, `make`, `python3`), which only
   count if the developer tools are installed.
+- `test` is required, a shell command checking the installed version before pmg records it; if
+  it fails, the install is rolled back. It must use the version itself through `{{ cmd }}` (the
+  command named like the package, or else the first of `bin` and `links`), `{{ cmds["<name>"] }}`
+  (any command of the version, also those in `paths`), `{{ dir }}`, or `{{ dirs.<key> }}`, so
+  neither another version nor a copy outside pmg can pass it, e.g. `"{{ cmd }} --version"`, or
+  `'test -f "{{ dir }}/loader"'` for a library.
 - `post_install` runs a shell command in the staging directory `PREFIX`, with the unpacked archive
   in `CONTENT`, e.g. to build from source. `{{ spec_dir }}` is the directory of the spec, for files
   shipped next to it. `uninstall` runs before the files are removed, and `upgrade` updates a

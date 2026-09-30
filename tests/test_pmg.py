@@ -165,6 +165,7 @@ class Env(msgspec.Struct):
         bin_entry: bool = True,
         check: str | None = None,
         external: tuple[str, ...] = (),
+        test: str | None = None,
     ) -> None:
         script_bytes = (script or f"#!/bin/sh\necho {name} {version}\n").encode()
         if archive_format in {"tar.gz", "tar.zst"}:
@@ -188,7 +189,7 @@ class Env(msgspec.Struct):
             asset = f"{name}-{{{{ version }}}}-linux"
             bin_path = "{{ asset }}"
             (self.assets / f"{name}-{version}-linux").write_bytes(script_bytes)
-        lines = [f"deps = {json.dumps(list(deps))}", *spec]
+        lines = [f"deps = {json.dumps(list(deps))}", *spec, f"test = '{test or '{{ cmd }}'}'"]
         if check:
             lines.append(f"check = {check}")
         if bin_entry:
@@ -525,6 +526,46 @@ def test_failed_post_install_leaves_nothing(env: Env) -> None:
     assert list((env.pmg_home / "tmp").iterdir()) == []
 
 
+def test_failed_test_leaves_nothing(env: Env) -> None:
+    env.add_package("tool", test="{{ cmd }} && echo test error >&2 && exit 4")
+    stderr = env.pmg("install", "tool", ok=False).stderr
+    assert "test of tool failed with exit code 4" in stderr
+    assert "test error" in stderr
+    assert env.installed() == {}
+    assert not list(env.bin.glob("*"))
+    assert not list((env.pmg_home / "bin").glob("*"))
+    assert list((env.pmg_home / "tmp").iterdir()) == []
+
+
+def test_test_runs_the_new_version(env: Env) -> None:
+    # neither the active version nor a copy outside pmg answer {{ cmd }} and {{ cmds }}
+    env.add_system_command("tool", "tool 3.1")
+    for version in ("1.0", "2.0"):
+        env.add_package(
+            "tool",
+            version=version,
+            post_install='cp "$PREFIX/bin/tool" "$PREFIX/bin/tool-copy"',
+            test=(
+                'test "$({{ cmd }})" = "tool {{ version }}" && '
+                'test "$({{ cmds["tool-copy"] }})" = "tool {{ version }}"'
+            ),
+        )
+    env.pmg("install", "--no-external", "tool@v1.0")
+    env.pmg("install", "--no-external", "tool@v2.0")
+    assert env.installed() == {"tool@v1.0": "explicit active", "tool@v2.0": "explicit"}
+
+
+def test_test_of_commands_in_paths(env: Env) -> None:
+    env.add_package(
+        "tool",
+        bin_entry=False,
+        spec=("content = true", 'paths = ["{{ dir }}/bin"]'),
+        test='test "$({{ cmd }})" = "tool 1.0"',
+    )
+    env.pmg("install", "tool")
+    assert env.installed() == {"tool@v1.0": "explicit active"}
+
+
 def test_failed_move_removes_files_moved_before(env: Env) -> None:
     # bin/a-copy moves first, then bin/sub/b fails, as a foreign file named sub is in the way
     env.add_package(
@@ -583,6 +624,7 @@ def test_dependency_cycle(env: Env) -> None:
 
 
 STATIC_TOOL_SPEC = """{fields}
+test = "{{{{ cmd }}}}"
 [external]
 [release]
 type = "static"
@@ -945,6 +987,17 @@ def test_schema_file_is_current(env: Env) -> None:
 
 def test_validate(env: Env) -> None:
     (env.root / "bad.toml").write_text('binn = { tool = "tool" }\n')
+    # the test is required
+    no_test = (FIXTURE_SPECS / "bat.toml").read_text().replace('test = "{{ cmd }} --version"\n', "")
+    (env.root / "no-test.toml").write_text(no_test)
+    stderr = env.pmg("validate", str(env.root / "no-test.toml"), ok=False).stderr
+    assert "missing required field `test`" in stderr
+    # and must use the version under test, not whatever PATH finds
+    (env.root / "path-test.toml").write_text(
+        no_test.replace("[external]", 'test = "bat --version"\n[external]')
+    )
+    stderr = env.pmg("validate", str(env.root / "path-test.toml"), ok=False).stderr
+    assert "the test must use the installed version" in stderr
     stderr = env.pmg(
         "validate", str(FIXTURE_SPECS / "bat.toml"), str(env.root / "bad.toml"), ok=False
     ).stderr
@@ -964,6 +1017,7 @@ def test_content_subdir_with_keep_and_remove(env: Env) -> None:
         },
         spec=('content = "sub/*"', 'keep = ["lib/*"]', 'remove = ["lib/*.a"]'),
         bin_entry=False,
+        test='test -f "{{ dir }}/lib/a.so"',
     )
     env.pmg("install", "tool")
     root = env.packages / "tool@v1.0"
@@ -1067,6 +1121,7 @@ def test_alpine_packages(env: Env) -> None:
     env.write_spec(
         "tool",
         """content = true
+test = "{{ cmd }}"
 keep = ["usr/bin/*", "usr/lib/*"]
 links = { tool = "{{ dir }}/usr/bin/tool" }
 [external]
@@ -1131,6 +1186,7 @@ def test_conda_package(env: Env) -> None:
         f"""content = "*-conda-linux-gnu/sysroot"
 remove = ["lib64/*.a", "usr/include"]
 post_install = 'cd "$PREFIX/dir" && ln -s lib64/libc.so.6 loader'
+test = 'test -f "{{{{ dir }}}}/loader"'
 [external]
 [release]
 type = "conda"

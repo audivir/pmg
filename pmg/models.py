@@ -150,6 +150,12 @@ class Package(BaseStruct, kw_only=True):
 
     release: Release
     download: Download
+    test: Command
+    """Shell command checking an installed version, run before it is recorded.
+
+    It must use the version itself, through {{ cmd }} (its main command), {{ cmds["<name>"] }}
+    (any of its commands), {{ dir }}, or {{ dirs.<key> }}, so that no copy outside pmg passes it.
+    """
     deps: list[str] = []
     """Names of the packages this one needs, each optionally with a version specifier."""
     platforms: list[Platform] = []
@@ -200,14 +206,15 @@ class Package(BaseStruct, kw_only=True):
     """PATH entries printed by `pmg env`, e.g. for commands the package installs itself."""
 
     def __post_init__(self) -> None:
-        """Validates the dependencies and `min_glibc`, and takes the download repo from the release.
+        """Validates deps, `min_glibc`, and the test, and takes the download repo from the release.
 
         Raises:
-            ValueError: If a dependency, `min_glibc`, or the download repo is invalid.
+            ValueError: If a dependency, `min_glibc`, the test, or the download repo is invalid.
         """
         from packaging.version import Version
 
         requirements([*self.deps, *(dep for deps in self.platform_deps.values() for dep in deps)])
+        check_test(self.test)
         if self.min_glibc:
             Version(self.min_glibc)
         dl, rl = self.download, self.release
@@ -224,6 +231,25 @@ class Package(BaseStruct, kw_only=True):
         from packaging.version import Version
 
         return Version(self.min_glibc) if self.min_glibc else None
+
+
+TEST_VARIABLES = frozenset({"cmd", "cmds", "dir", "dirs"})
+"""Template variables naming the files of the version under test."""
+
+
+def check_test(test: str) -> None:
+    """Checks that a test uses the version under test through its template variables.
+
+    Raises:
+        ValueError: If the test uses none of `TEST_VARIABLES`.
+    """
+    import jinja2
+    import jinja2.meta
+
+    used = jinja2.meta.find_undeclared_variables(jinja2.Environment().parse(test))  # noqa: S701
+    if not used & TEST_VARIABLES:
+        names = ", ".join(f"{{{{ {name} }}}}" for name in sorted(TEST_VARIABLES))
+        raise ValueError(f"the test must use the installed version through one of {names}")
 
 
 class Record(BaseStruct, kw_only=True):
