@@ -189,10 +189,10 @@
         "check": {
           "anyOf": [
             {
-              "type": "null"
+              "$ref": "#/$defs/Check"
             },
             {
-              "$ref": "#/$defs/Check"
+              "type": "null"
             }
           ],
           "default": null
@@ -561,10 +561,10 @@
               "type": "string"
             },
             {
-              "type": "null"
+              "$ref": "#/$defs/GeneratedCompletion"
             },
             {
-              "$ref": "#/$defs/GeneratedCompletion"
+              "type": "null"
             }
           ],
           "default": null
@@ -575,10 +575,10 @@
               "type": "string"
             },
             {
-              "type": "null"
+              "$ref": "#/$defs/GeneratedCompletion"
             },
             {
-              "$ref": "#/$defs/GeneratedCompletion"
+              "type": "null"
             }
           ],
           "default": null
@@ -589,10 +589,10 @@
               "type": "string"
             },
             {
-              "type": "null"
+              "$ref": "#/$defs/GeneratedCompletion"
             },
             {
-              "$ref": "#/$defs/GeneratedCompletion"
+              "type": "null"
             }
           ],
           "default": null
