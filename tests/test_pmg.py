@@ -556,11 +556,13 @@ def test_test_runs_the_new_version(env: Env) -> None:
 
 
 def test_test_of_commands_in_paths(env: Env) -> None:
+    # only executables count, and entries that do not exist are skipped
     env.add_package(
         "tool",
         bin_entry=False,
-        spec=("content = true", 'paths = ["{{ dir }}/bin"]'),
-        test='test "$({{ cmd }})" = "tool 1.0"',
+        files={"bin/notes.txt": "not a command"},
+        spec=("content = true", 'paths = ["{{ dir }}/bin", "{{ dir }}/missing"]'),
+        test='test "$({{ cmd }})" = "tool 1.0" && test -z "{{ cmds.get("notes.txt", "") }}"',
     )
     env.pmg("install", "tool")
     assert env.installed() == {"tool@v1.0": "explicit active"}
