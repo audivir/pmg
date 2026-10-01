@@ -235,6 +235,8 @@ def list_installed() -> None:
         state = ["active"] if record.active else []
         if record.external:
             state.append(f"external {record.external_version or 'unknown'}")
+        if record.upgraded_tag:
+            state.append(f"upgraded to {record.upgraded_tag}")
         rows.append([key, "explicit" if record.explicit else "dependency", " ".join(state)])
     print_columns(rows)
 

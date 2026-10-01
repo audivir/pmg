@@ -275,11 +275,18 @@ class Record(BaseStruct, kw_only=True):
     """Whether the version was found outside pmg, which then leaves its files alone."""
     external_version: str | None = None
     """Version printed by the command of an external version."""
+    upgraded_tag: str | None = None
+    """Tag the upgrade command updated the version to in place; tag still names its files."""
+
+    @property
+    def current_tag(self) -> str:
+        """Tag of the installed files, which an upgrade in place moves past the install tag."""
+        return self.upgraded_tag or self.tag
 
     @property
     def version_tag(self) -> str | None:
         """Tag, or the version of an external version, compared against version specifiers."""
-        return self.external_version if self.external else self.tag
+        return self.external_version if self.external else self.current_tag
 
     @property
     def key(self) -> str:

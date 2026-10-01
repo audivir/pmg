@@ -783,17 +783,23 @@ def test_upgrade_keeps_version_a_dependent_needs(env: Env) -> None:
 def test_upgrade_in_place_and_external(env: Env) -> None:
     env.add_system_command("other", "other 3.1")
     env.add_package("other")
-    env.add_package(
-        "tool",
-        spec=("content = true", """upgrade = 'echo upgraded > "{{ dir }}/marker"'"""),
-    )
+    spec = ("content = true", """upgrade = 'echo upgraded >> "{{ dir }}/marker"'""")
+    env.add_package("tool", spec=spec)
     env.pmg("install", "tool", "other")
-    env.pmg("upgrade")
-    assert (env.packages / "tool@v1.0" / "marker").read_text() == "upgraded\n"
+    marker = env.packages / "tool@v1.0" / "marker"
+    # the latest release is installed, so the upgrade command does not run
+    assert "tool v1.0 is up to date" in env.pmg("upgrade").stderr
+    assert not marker.exists()
+    env.add_package("tool", version="2.0", spec=spec)
+    assert "upgraded tool in place to v2.0" in env.pmg("upgrade").stderr
+    assert marker.read_text() == "upgraded\n"
+    # the record keeps the release of the upgrade, so it runs only once
+    assert "tool v2.0 is up to date" in env.pmg("upgrade", "tool").stderr
+    assert marker.read_text() == "upgraded\n"
     # external versions are left to their package manager
     assert env.installed() == {
         "other@external": "explicit external 3.1",
-        "tool@v1.0": "explicit active",
+        "tool@v1.0": "explicit active upgraded to v2.0",
     }
 
 

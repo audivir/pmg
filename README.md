@@ -141,7 +141,7 @@ eval "$(pmg env)"
   installed of the others becomes active.
 - `upgrade` installs the latest release of each active version next to it and makes it active. The
   old version goes unless a dependent still needs it. Packages with an `upgrade` command update in
-  place, external versions are left to their package manager.
+  place, but only when a newer release exists, and `list` shows the release they were upgraded to. External versions are left to their package manager.
 - `autoremove` removes dependencies that no directly installed package needs anymore.
 - `env` prints shell code setting the environment and `PATH` entries of the active versions. Every
   command also writes it to `$PMG_HOME/env.sh`, which shells can source without starting pmg.

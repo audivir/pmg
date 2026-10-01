@@ -1405,23 +1405,27 @@ def find_orphans(records: dict[str, Record]) -> list[str]:
 def upgrade_package(name: str) -> None:
     """Upgrades the active version of a package to the latest release.
 
-    Packages with an upgrade command update in place. Others get the latest release next to the
-    active version, which it replaces unless a dependent still needs it.
+    Packages with an upgrade command update in place to a newer release, which their record keeps
+    as upgraded_tag. Others get the latest release next to the active version, which it replaces
+    unless a dependent still needs it.
     """
+    import msgspec
+
     records = load_records()
     active = active_version(records, name)
     # external versions, which are never active, are left to their package manager
     if active is None:
         return
     pkg = load_spec(name)
-    context = installed_context(active, pkg, records)
-    if pkg.upgrade:
-        run_shell(name, "upgrade", render(pkg.upgrade, context), env=command_env(pkg, context))
-        logger.info("upgraded %s in place", name)
-        return
     latest = fetch_release(name, pkg, detect_platform(pkg.min_glibc_version))
-    if latest == active.tag:
+    if latest == active.current_tag:
         logger.info("%s %s is up to date", name, latest)
+        return
+    if pkg.upgrade:
+        context = installed_context(active, pkg, records)
+        run_shell(name, "upgrade", render(pkg.upgrade, context), env=command_env(pkg, context))
+        save_record(msgspec.structs.replace(active, upgraded_tag=latest))
+        logger.info("upgraded %s in place to %s", name, latest)
         return
     install_package(name, explicit=active.explicit, tag=latest)
     records = load_records()
