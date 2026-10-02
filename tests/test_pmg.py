@@ -1066,6 +1066,18 @@ def test_validate(env: Env) -> None:
     assert "binn" in stderr
     assert "1 specs are valid" in env.pmg("validate", str(FIXTURE_SPECS / "bat.toml")).stderr
 
+    # a dir checks its specs; a missing file, broken TOML, and a dir without specs only count as
+    # invalid, the other paths are still checked
+    count = len(list(FIXTURE_SPECS.glob("*.toml")))
+    assert f"{count} specs are valid" in env.pmg("validate", str(FIXTURE_SPECS)).stderr
+    (env.root / "broken.toml").write_text("x = [\n")
+    (env.root / "empty").mkdir()
+    paths = ["missing.toml", "broken.toml", "empty", "bad.toml"]
+    stderr = env.pmg("validate", *(str(env.root / p) for p in paths), ok=False).stderr
+    for path in paths:
+        assert f"{env.root / path}: " in stderr
+    assert "Traceback" not in stderr
+
 
 def test_content_subdir_with_keep_and_remove(env: Env) -> None:
     env.add_package(

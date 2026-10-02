@@ -276,18 +276,29 @@ def print_completion() -> None:
 def validate(paths: Annotated[list[Path], doctyper.Argument()]) -> None:
     """Checks spec files against the models of pmg, e.g. in the CI of a spec repo.
 
+    A path that cannot be read or decoded counts as invalid, the others are still checked.
+
     Args:
-        paths: Spec files to check.
+        paths: Spec files to check, or dirs whose *.toml files are checked.
     """
     import msgspec
 
     invalid = 0
+    files: list[Path] = []
     for path in paths:
+        if not path.is_dir():
+            files.append(path)
+        elif specs := sorted(path.glob("*.toml")):
+            files += specs
+        else:
+            logger.error("%s: no *.toml specs in this dir", path)
+            invalid += 1
+    for path in files:
         try:
             decode(path.read_text())
-        except msgspec.ValidationError as e:
+        except (OSError, UnicodeDecodeError, msgspec.DecodeError) as e:
             logger.error("%s: %s", path, e)  # noqa: TRY400
             invalid += 1
     if invalid:
         raise SystemExit(1)
-    logger.info("%d specs are valid", len(paths))
+    logger.info("%d specs are valid", len(files))
