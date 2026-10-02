@@ -905,6 +905,11 @@ def test_completions(env: Env) -> None:
     assert "other" not in complete("pmg uninstall ")
 
 
+def test_show_prints_the_spec(env: Env) -> None:
+    env.add_package("tool")
+    assert env.pmg("show", "tool").stdout == (env.specs / "tool.toml").read_text()
+
+
 def test_external_names(env: Env) -> None:
     env.add_package("tool", external=('brew = "tool-brew"', 'apt = "tool-apt"'))
     assert env.pmg("external", "tool").stdout == "brew tool-brew\napt tool-apt\n"

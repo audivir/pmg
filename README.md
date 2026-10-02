@@ -109,7 +109,8 @@ bash and fish find the completions on their own. zsh needs the directory in `fpa
 Specs are searched in `$PMG_SPECS_DIR`, then in `$PMG_HOME/specs`, then in the registry. `pmg update`
 downloads the registry from [pmg-specs](https://github.com/audivir/pmg-specs) (or
 `$PMG_REGISTRY_URL`), the first install does so on its own. `PMG_HOME` defaults to
-`$XDG_DATA_HOME/pmg` and also holds the install records.
+`$XDG_DATA_HOME/pmg` and also holds the install records. `pmg show <name>` prints the spec that
+pmg uses for a package.
 
 `schema.json` is the JSON schema of specs, which `pmg schema` prints and a test keeps current. A
 first line `#:schema https://raw.githubusercontent.com/audivir/pmg/main/schema.json` hands it to

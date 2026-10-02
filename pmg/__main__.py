@@ -22,6 +22,7 @@ def main() -> None:
         print_schema,
         print_version,
         search,
+        show,
         uninstall,
         update,
         upgrade,
@@ -52,6 +53,7 @@ def main() -> None:
     app.command("schema")(print_schema)
     app.command("env")(print_env)
     app.command()(external)
+    app.command()(show)
     app.command()(search)
     app.command("list")(list_installed)
     app.command("completion")(print_completion)

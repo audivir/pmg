@@ -209,6 +209,18 @@ def external(name: Annotated[str, doctyper.Argument(autocompletion=complete_avai
                 print(f"{manager} {package}")  # noqa: T201
 
 
+def show(name: Annotated[str, doctyper.Argument(autocompletion=complete_available)]) -> None:
+    """Prints the spec of a package as written, from the first spec dir that has one.
+
+    Args:
+        name: Name of the package.
+    """
+    from pmg.core import exit_on_error, find_spec
+
+    with exit_on_error():
+        print(find_spec(name).read_text(), end="")  # noqa: T201
+
+
 def search(pattern: Annotated[str | None, doctyper.Argument()] = None) -> None:
     """Lists the packages with a spec, marking the installed ones.
 

@@ -238,14 +238,12 @@ def decode(spec: str) -> Package:
     return msgspec.toml.decode(spec, type=Package)
 
 
-def load_spec(name: str) -> Package:
-    """Loads the spec of a package.
+def find_spec(name: str) -> Path:
+    """Returns the spec file of a package, from the first spec dir that has one.
 
     Raises:
-        PmgError: If the spec is missing or invalid.
+        PmgError: If no spec dir has one.
     """
-    import msgspec
-
     path = available_specs().get(name)
     # the first use of pmg downloads the registry
     if path is None and not registry_dir().exists():
@@ -254,6 +252,18 @@ def load_spec(name: str) -> Package:
     if path is None:  # pragma: no cover
         dirs = ", ".join(str(directory) for directory in spec_dirs())
         raise PmgError(f"no spec for {name} in {dirs}")
+    return path
+
+
+def load_spec(name: str) -> Package:
+    """Loads the spec of a package.
+
+    Raises:
+        PmgError: If the spec is missing or invalid.
+    """
+    import msgspec
+
+    path = find_spec(name)
     try:
         return decode(path.read_text())
     except msgspec.ValidationError as e:  # pragma: no cover
