@@ -245,8 +245,8 @@ def find_spec(name: str) -> Path:
         PmgError: If no spec dir has one.
     """
     path = available_specs().get(name)
-    # the first use of pmg downloads the registry
-    if path is None and not registry_dir().exists():
+    # the first use of pmg downloads the registry, and a later one gets a spec added since
+    if path is None:
         update_registry()
         path = available_specs().get(name)
     if path is None:  # pragma: no cover

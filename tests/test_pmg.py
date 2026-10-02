@@ -820,18 +820,18 @@ def test_upgrade_in_place_and_external(env: Env) -> None:
     }
 
 
-def write_registry(env: Env, version: str) -> None:
+def write_registry(env: Env, version: str, name: str = "tool") -> None:
     spec = STATIC_TOOL_SPEC.format(
-        fields="""post_install = 'cp "{{ spec_dir }}/tool/script" "$PREFIX/bin/tool"'""",
+        fields=f"""post_install = 'cp "{{{{ spec_dir }}}}/{name}/script" "$PREFIX/bin/{name}"'""",
         download='type = "url"\nurl = "' + env.base_url + '/{{ asset }}"',
     ).replace('tag = "v1.0"', f'tag = "v{version}"')
     spec += "".join(f'{platform} = "script-{{{{ version }}}}"\n' for platform in PLATFORMS)
     (env.assets / f"script-{version}").write_text("")
     script = f"#!/bin/sh\necho registry {version}\n".encode()
     entries = {
-        "pmg-specs-main/specs/tool.toml": (spec.encode(), 0o644),
+        f"pmg-specs-main/specs/{name}.toml": (spec.encode(), 0o644),
         # files a spec needs go into a dir named like it
-        "pmg-specs-main/specs/tool/script": (script, 0o755),
+        f"pmg-specs-main/specs/{name}/script": (script, 0o755),
     }
     (env.assets / "registry.tar.gz").write_bytes(gzip.compress(tar_bytes(entries)))
 
@@ -845,6 +845,10 @@ def test_registry(env: Env) -> None:
     assert "updated the specs" in env.pmg("update").stderr
     env.pmg("upgrade", specs_dir=False)
     assert env.run_bin("tool") == "registry 2.0"
+    # a spec added to the registry since its download is fetched without pmg update
+    write_registry(env, "3.0", name="new-tool")
+    assert "updated the specs" in env.pmg("install", "new-tool", specs_dir=False).stderr
+    assert env.installed()["new-tool@v3.0"] == "explicit active"
 
 
 @pytest.mark.skipif(shutil.which("zsh") is None, reason="no zsh")
