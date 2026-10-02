@@ -656,6 +656,23 @@ def test_command_download(env: Env) -> None:
     assert (env.packages / "tool@v1.0" / "bin" / "tool").exists()
 
 
+def test_command_download_gets_the_asset(env: Env) -> None:
+    command = (
+        'printf "#!/bin/sh\\necho {{ asset }}\\n" > "$PREFIX/bin/tool" && '
+        'chmod +x "$PREFIX/bin/tool"'
+    )
+    assets = "\n".join(
+        f'{platform} = "tool-{{{{ version }}}}-{platform}"' for platform in PLATFORMS
+    )
+    env.write_spec(
+        "tool",
+        STATIC_TOOL_SPEC.format(fields="", download=f"type = \"command\"\ncmd = '{command}'")
+        + assets,
+    )
+    env.pmg("install", "tool")
+    assert env.run_bin("tool").startswith("tool-1.0-")
+
+
 def test_env_and_paths(env: Env) -> None:
     # external versions are never active, so they print nothing
     env.add_system_command("other", "other 3.1")

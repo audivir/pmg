@@ -412,7 +412,7 @@
     },
     "CommandDownload": {
       "title": "CommandDownload",
-      "description": "Stores the shell command of an installer like the one of rustup.",
+      "description": "Stores the shell command of an installer like rustup's, with {{ asset }} if any.",
       "type": "object",
       "properties": {
         "type": {

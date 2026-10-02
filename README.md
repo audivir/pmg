@@ -48,7 +48,8 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
   `{{ arch }}` (as `uname -m` prints it), `{{ data }}` (`$XDG_DATA_HOME`), `{{ bin }}`, `{{ dir }}`,
   and `{{ dirs.<key> }}`.
 - `release` and `download` are of the type `github`, `url`, `command` (a command printing the tag,
-  or installing into the staging directory), `static` (release only), `apk` (packages of the main Alpine repo, of the host release or else
+  or installing into the staging directory, with `{{ asset }}` if there are assets), `static`
+  (release only), `apk` (packages of the main Alpine repo, of the host release or else
   latest-stable), or `conda` (the newest `.conda` file of the asset package in a channel).
 - glibc hosts older than `min_glibc` get the musl asset. `platforms` limits a package to some
   platforms, other hosts skip it as a dependency. `platform_deps` adds dependencies for the

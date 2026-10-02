@@ -6,7 +6,7 @@ repo. Templates in a spec are Jinja templates with
 {{ tag }} (the release tag, e.g. "v0.26.1"), {{ version }} (the tag without a leading "v"),
 {{ arch }} (the machine as `uname -m` prints it), {{ data }} (`$XDG_DATA_HOME`), {{ bin }} (the bin
 dir), {{ dir }} (the package dir), {{ dirs.<key> }} (the extra dirs of the package), and, for
-files, {{ asset }} (the asset name).
+files and download commands, {{ asset }} (the asset name).
 
 Packages install everything else into their own dirs, `$PMG_HOME/packages/<name>@<tag>`, which
 they own as a whole. Their commands go to `$PMG_HOME/bin/<cmd>@<tag>`, and the plain names of the
@@ -367,14 +367,18 @@ def is_for_host(pkg: Package) -> bool:
     """Checks whether a package is for the host.
 
     Its platforms must include the host, and it must have an asset for the host if its download
-    needs one.
+    needs one, as a command download with assets does.
     """
     from pmg.models import ApkDownload, CommandDownload
 
     host = detect_platform(pkg.min_glibc_version)
     if pkg.platforms and host not in pkg.platforms:
         return False
-    return isinstance(pkg.download, ApkDownload | CommandDownload) or host in pkg.assets
+    if isinstance(pkg.download, ApkDownload) or (
+        isinstance(pkg.download, CommandDownload) and not pkg.assets
+    ):
+        return True
+    return host in pkg.assets
 
 
 @functools.cache
@@ -809,7 +813,8 @@ def run_install(
     """Unpacks the archives and places the files and dirs of the package in the staging dir.
 
     Release archives lose a single top-level dir; Alpine and conda packages keep their layout.
-    A command download runs its command instead, with the environment of the package.
+    A command download runs its command instead, with the environment of the package and, if the
+    package has assets, {{ asset }}.
 
     Raises:
         PmgError: If a file is missing from the archives or a spec command fails.
@@ -818,7 +823,10 @@ def run_install(
 
     env = command_env(pkg, staged_context(context, target)) | {"PREFIX": str(target)}
     if isinstance(pkg.download, CommandDownload):
-        run_shell(name, "download command", render(pkg.download.cmd, context), target, env)
+        host = detect_platform(pkg.min_glibc_version)
+        extra = {"asset": render(asset_name(pkg, host), context)} if pkg.assets else {}
+        cmd = render(pkg.download.cmd, context, **extra)
+        run_shell(name, "download command", cmd, target, env)
     content = target.parent / "unpacked"
     content.mkdir()
     for archive in archives:

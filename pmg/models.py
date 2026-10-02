@@ -70,7 +70,7 @@ class UrlDownload(BaseStruct, tag="url", kw_only=True):
 
 
 class CommandDownload(BaseStruct, tag="command", kw_only=True):
-    """Stores the shell command of an installer like the one of rustup."""
+    """Stores the shell command of an installer like rustup's, with {{ asset }} if any."""
 
     cmd: Command
 
