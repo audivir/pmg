@@ -374,11 +374,11 @@ def is_for_host(pkg: Package) -> bool:
     host = detect_platform(pkg.min_glibc_version)
     if pkg.platforms and host not in pkg.platforms:
         return False
-    if isinstance(pkg.download, ApkDownload) or (
-        isinstance(pkg.download, CommandDownload) and not pkg.assets
-    ):
-        return True
-    return host in pkg.assets
+    return (
+        isinstance(pkg.download, ApkDownload)
+        or (isinstance(pkg.download, CommandDownload) and not pkg.assets)
+        or host in pkg.assets
+    )
 
 
 @functools.cache
