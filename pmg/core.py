@@ -1078,6 +1078,27 @@ def find_external(name: str, pkg: Package) -> Record | None:
     )
 
 
+def refresh_external(name: str, pkg: Package, versions: list[Record]) -> list[Record]:
+    """Checks that the recorded external version is still there, e.g. not removed by brew.
+
+    Returns:
+        The versions without the external one if it is gone, whose record is then removed; a
+        changed version of one still there is recorded.
+    """
+    recorded = next((version for version in versions if version.external), None)
+    if recorded is None:
+        return versions
+    found = find_external(name, pkg)
+    if found is None:
+        record_path(recorded.key).unlink()
+        logger.info("%s is no longer found outside pmg", name)
+        return [version for version in versions if version is not recorded]
+    if found.external_version != recorded.external_version:
+        recorded.external_version = found.external_version
+        save_record(recorded)
+    return versions
+
+
 def use_external(  # noqa: PLR0913, PLR0917
     name: str,
     pkg: Package,
@@ -1189,6 +1210,7 @@ def nothing_to_install(  # noqa: PLR0913, PLR0917
         return True
     if tag is not None:
         return False
+    versions = refresh_external(name, pkg, versions)
     if not explicit and any(satisfies(r.version_tag, specifier) for r in versions):
         return True
     return external and use_external(name, pkg, versions, explicit, specifier, record_external)

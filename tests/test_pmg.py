@@ -1116,6 +1116,21 @@ def test_external_command(env: Env) -> None:
     assert (env.system / "tool").exists()
 
 
+def test_external_version_that_is_gone_or_changed(env: Env) -> None:
+    env.add_system_command("tool", "tool 3.1")
+    env.add_package("tool")
+    env.add_package("app", deps=("tool",))
+    env.pmg("install", "tool")
+    env.add_system_command("tool", "tool 3.2")
+    env.pmg("install", "app")
+    assert env.installed()["tool@external"] == "explicit external 3.2"
+    # removed by its package manager, so pmg installs its own instead of trusting the record
+    (env.system / "tool").unlink()
+    assert "tool is no longer found outside pmg" in env.pmg("install", "tool").stderr
+    assert env.installed() == {"app@v1.0": "explicit active", "tool@v1.0": "explicit active"}
+    assert env.run_bin("tool") == "tool 1.0"
+
+
 def test_external_package_found_by_name(env: Env) -> None:
     # without commands in the spec, e.g. when post_install builds them, the name is the command
     env.add_system_command("tool", "tool 2.0")
