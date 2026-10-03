@@ -35,6 +35,7 @@ from urllib.parse import urlsplit
 from pmg.packaging_utils import requirements, tag_version
 
 if TYPE_CHECKING:
+    import tarfile
     from collections.abc import Generator, Iterable
 
     import jinja2
@@ -652,6 +653,19 @@ def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath
     return [download_file(url, dl_dir / Path(urlsplit(url).path).name)]
 
 
+def extract_tar(tar_file: tarfile.TarFile, dest: Path) -> None:
+    """Extracts all members into `dest` with the data filter, which refuses unsafe members.
+
+    Raises:
+        PmgError: If Python lacks the filter, which 3.10.12 and 3.11.4 backported.
+    """
+    import tarfile
+
+    if not hasattr(tarfile, "data_filter"):  # pragma: no cover
+        raise PmgError("extracting archives safely needs Python 3.10.12, 3.11.4, or newer")
+    tar_file.extractall(dest, filter="data")
+
+
 def extract_tar_zst(fileobj: IO[bytes], dest: Path) -> None:
     """Extracts a zstd-compressed tar stream into `dest`."""
     import tarfile
@@ -662,7 +676,7 @@ def extract_tar_zst(fileobj: IO[bytes], dest: Path) -> None:
         zstandard.ZstdDecompressor().stream_reader(fileobj) as reader,
         tarfile.open(fileobj=reader, mode="r|") as tar_file,
     ):
-        tar_file.extractall(dest, filter="data")
+        extract_tar(tar_file, dest)
 
 
 def unpack(archive: Path, dest: Path) -> None:
@@ -693,7 +707,7 @@ def unpack(archive: Path, dest: Path) -> None:
     elif archive.name.endswith(TAR_SUFFIXES):
         # an .apk is gzipped tars one after another: signature, .PKGINFO, and files
         with tarfile.open(archive) as tar_file:
-            tar_file.extractall(dest, filter="data")
+            extract_tar(tar_file, dest)
         if archive.name.endswith(".apk"):
             for path in dest.glob(".*"):
                 remove_path(path)

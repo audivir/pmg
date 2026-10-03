@@ -296,7 +296,7 @@ def validate(paths: Annotated[list[Path], doctyper.Argument()]) -> None:
     for path in files:
         try:
             decode(path.read_text())
-        except (OSError, UnicodeDecodeError, msgspec.DecodeError) as e:
+        except (OSError, UnicodeDecodeError, msgspec.DecodeError) as e:  # noqa: PERF203
             logger.error("%s: %s", path, e)  # noqa: TRY400
             invalid += 1
     if invalid:

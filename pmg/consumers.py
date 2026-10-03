@@ -5,9 +5,12 @@ Imports `mxhttp` on imports, try not to import globally.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Annotated, override
+from typing import TYPE_CHECKING, Annotated
 
 from mxhttp import Downloader, RawPath, SyncConsumer, TqdmProgress, base_url, get
+
+# typing has override only from Python 3.12 on.
+from typing_extensions import override
 
 from pmg.models import GitHubReleaseInfo  # noqa: TC001
 

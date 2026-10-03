@@ -6,7 +6,7 @@ Imports `msgspec` on import, try not to import globally.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, NotRequired, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Literal, TypeAlias, TypedDict
 
 import msgspec
 
@@ -90,14 +90,14 @@ class CondaDownload(BaseStruct, tag="conda", kw_only=True):
 Download: TypeAlias = GitHubDownload | UrlDownload | CommandDownload | ApkDownload | CondaDownload
 
 
-class Assets(TypedDict):
+class Assets(TypedDict, total=False):
     """Stores the asset file name for each platform; a missing platform is unsupported."""
 
-    glibc_x64: NotRequired[str]
-    glibc_arm64: NotRequired[str]
-    musl_x64: NotRequired[str]
-    musl_arm64: NotRequired[str]
-    macos_arm64: NotRequired[str]
+    glibc_x64: str
+    glibc_arm64: str
+    musl_x64: str
+    musl_arm64: str
+    macos_arm64: str
 
 
 class External(BaseStruct, kw_only=True):

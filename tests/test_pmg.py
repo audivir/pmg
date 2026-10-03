@@ -21,11 +21,12 @@ import tarfile
 import threading
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypeAlias, override
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 import msgspec
 import pytest
 import zstandard
+from typing_extensions import override
 
 import pmg.core
 from pmg.core import detect_platform
