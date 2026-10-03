@@ -27,6 +27,8 @@ dependencies = [
   "msgspec>=0.22.0",
   "mxhttp",
   "packaging",
+  # msgspec reads TOML with tomllib, which Python has only from 3.11 on.
+  "tomli; python_version < '3.11'",
   "typing-extensions",
   "zstandard",
 ]
