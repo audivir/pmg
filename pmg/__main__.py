@@ -40,7 +40,10 @@ def main() -> None:
         # reduce completions time
         doctyper._completion_classes._sanitize_help_text = lambda text: text  # noqa: SLF001
 
-    logging.basicConfig(format="%(message)s")
+    from pmg.core import LogHandler
+
+    # log lines go above the bars of installs and upgrades
+    logging.basicConfig(format="%(message)s", handlers=[LogHandler()])
     logger.setLevel(logging.INFO)
 
     app = doctyper.DocTyper(help=__doc__)

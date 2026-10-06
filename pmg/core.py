@@ -16,7 +16,9 @@ commands, man pages, and completions of the active version link into the shared 
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import contextvars
 import functools
 import graphlib
 import logging
@@ -27,23 +29,29 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
-from typing import IO, TYPE_CHECKING
+from typing import IO, TYPE_CHECKING, TypeVar
 from urllib.parse import urlsplit
+
+# typing has override only from Python 3.12 on.
+from typing_extensions import override
 
 from pmg.packaging_utils import requirements, tag_version
 
 if TYPE_CHECKING:
     import tarfile
-    from collections.abc import Generator, Iterable
+    from collections.abc import Awaitable, Callable, Generator, Iterable
+    from typing import TypeAlias
 
     import jinja2
     from _typeshed import StrPath
     from packaging.specifiers import SpecifierSet
     from packaging.version import Version
+    from tqdm import tqdm
 
-    from pmg.consumers import GitHubApi
+    from pmg.consumers import Files, GitHubApi
     from pmg.models import CondaFile, Context, Package, Platform, Record
 
 GH_TOKEN_ENV = "PMG_GH_TOKEN"  # noqa: S105
@@ -71,6 +79,12 @@ CACHE_SECONDS = 3600
 """Age after which indexes of Alpine and conda packages are downloaded again."""
 TAR_SUFFIXES = (".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2", ".apk")
 ZSTD_SUFFIXES = (".tar.zst", ".tzst")
+MAX_DOWNLOADS = 6
+"""Downloads at once, each with a bar of its own on a terminal."""
+
+T = TypeVar("T")
+DepsReady: TypeAlias = "Callable[[], Awaitable[None]]"
+"""Waits until the dependencies of a package are done, see `run_units`."""
 
 logger = logging.getLogger(__package__)
 
@@ -277,7 +291,7 @@ def update_registry() -> None:
     home = pmg_home()
     home.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=home) as tmp:
-        archive = download_file(url, Path(tmp) / "registry.tar.gz")
+        archive = run_async(download_file(url, Path(tmp) / "registry.tar.gz"))
         unpack(archive, Path(tmp) / "unpacked")
         if registry_dir().exists():
             registry_dir().rename(Path(tmp) / "old")
@@ -299,10 +313,12 @@ def load_records() -> dict[str, Record]:
     records_dir = pmg_home() / "installed"
     if not records_dir.is_dir():
         return {}
-    return {
-        path.stem: msgspec.json.decode(path.read_bytes(), type=Record)
-        for path in sorted(records_dir.glob("*.json"))
-    }
+    records: dict[str, Record] = {}
+    for path in sorted(records_dir.glob("*.json")):
+        # a package installed at the same time may remove a record, e.g. after a failed test
+        with contextlib.suppress(FileNotFoundError):
+            records[path.stem] = msgspec.json.decode(path.read_bytes(), type=Record)
+    return records
 
 
 def save_record(record: Record) -> None:
@@ -316,15 +332,53 @@ def save_record(record: Record) -> None:
     tmp_path.replace(path)
 
 
-@functools.cache
+class Session:
+    """The HTTP clients of an event loop, which no other loop can use, and its cached downloads."""
+
+    def __init__(self) -> None:
+        """Starts without clients, which are created on their first use."""
+        self.github: GitHubApi | None = None
+        self.files: dict[str, Files] = {}
+        """Clients by scheme and host, so that downloads from a host share its connections."""
+        self.cached: dict[str, asyncio.Task[Path]] = {}
+        """Downloads to the cache by URL, so that concurrent requests share one."""
+        self.slots = asyncio.Semaphore(MAX_DOWNLOADS)
+
+    async def close(self) -> None:
+        """Closes the connections of the clients."""
+        for consumer in [*([self.github] if self.github else []), *self.files.values()]:
+            await consumer.session.aclose()
+
+
+SESSION: contextvars.ContextVar[Session] = contextvars.ContextVar("SESSION")
+
+
+def run_async(awaitable: Awaitable[T]) -> T:
+    """Runs a coroutine in a new event loop, with HTTP clients of its own."""
+
+    async def main() -> T:
+        session = Session()
+        # the task of main has its own context, which its tasks and threads copy
+        SESSION.set(session)
+        try:
+            return await awaitable
+        finally:
+            await session.close()
+
+    return asyncio.run(main())
+
+
 def github_api() -> GitHubApi:
-    """Returns the GitHub API client, authenticated if a token is set."""
+    """Returns the GitHub API client of the event loop, authenticated if a token is set."""
     from mxhttp import BearerAuth
 
     from pmg.consumers import GitHubApi
 
-    token = os.getenv(GH_TOKEN_ENV) or os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
-    return GitHubApi(auth=BearerAuth(token) if token else None)
+    session = SESSION.get()
+    if session.github is None:
+        token = os.getenv(GH_TOKEN_ENV) or os.getenv("GH_TOKEN") or os.getenv("GITHUB_TOKEN")
+        session.github = GitHubApi(auth=BearerAuth(token) if token else None)
+    return session.github
 
 
 def split_repo(repo: str) -> tuple[str, str]:
@@ -429,6 +483,95 @@ def spinner(text: str) -> Generator[None]:
         yield
 
 
+class Board:
+    """Shows a bar counting the finished packages, with the steps running for them.
+
+    The bar is the first that tqdm places and the last it closes, so it stays on the first line
+    with the bars of the downloads below it, log lines go above it, and the cursor ends at the
+    start of the line.
+    """
+
+    def __init__(self, desc: str, total: int) -> None:
+        """Shows the bar."""
+        from tqdm import tqdm
+
+        # without a rate, as packages take from no time to minutes
+        self.bar: tqdm[None] = tqdm(
+            total=total,
+            desc=desc,
+            leave=False,
+            file=sys.stderr,
+            bar_format="{desc}: {n}/{total} |{bar}| {elapsed}{postfix}",
+        )
+        self.running: list[str] = []
+        self.lock = threading.Lock()
+
+    @contextlib.contextmanager
+    def step(self, text: str) -> Generator[None]:
+        """Names the step after the bar while the block runs."""
+        with self.lock:
+            self.running.append(text)
+            self.bar.set_postfix_str(", ".join(self.running))
+        try:
+            yield
+        finally:
+            with self.lock:
+                self.running.remove(text)
+                self.bar.set_postfix_str(", ".join(self.running))
+
+    def advance(self) -> None:
+        """Counts a package as done."""
+        with self.lock:
+            self.bar.update()
+
+    def write(self, line: str) -> None:
+        """Writes a line above the bars."""
+        from tqdm import tqdm
+
+        tqdm.write(line, file=sys.stderr)
+
+    async def tick(self) -> None:
+        """Updates the elapsed time every second, also while no step finishes."""
+        while True:
+            await asyncio.sleep(1)
+            with self.lock:
+                self.bar.refresh()
+
+
+BOARD: contextvars.ContextVar[Board | None] = contextvars.ContextVar("BOARD", default=None)
+
+
+class LogHandler(logging.Handler):
+    """Writes log lines to stderr, above the bars while a board shows them."""
+
+    @override
+    def emit(self, record: logging.LogRecord) -> None:
+        """Writes the line of a record."""
+        try:
+            line = self.format(record)
+            board = BOARD.get()
+            if board is None:
+                # the current stderr, which a spinner may redirect to print above itself
+                sys.stderr.write(f"{line}\n")
+                sys.stderr.flush()
+            else:
+                board.write(line)
+        except Exception:  # noqa: BLE001  # pragma: no cover
+            self.handleError(record)
+
+
+@contextlib.contextmanager
+def activity(text: str) -> Generator[None]:
+    """Shows the text while the block runs, on the board if there is one, else as a spinner."""
+    board = BOARD.get()
+    if board is None:
+        with spinner(text):
+            yield
+        return
+    with board.step(text):
+        yield
+
+
 def run_shell(
     name: str, step: str, cmd: str, cwd: Path | None = None, env: dict[str, str] | None = None
 ) -> str:
@@ -450,7 +593,7 @@ def run_shell(
         cwd = pmg_home()
         cwd.mkdir(parents=True, exist_ok=True)
     # spec commands are shell commands by design; builds in post_install take minutes
-    with spinner(f"{step} of {name}"):
+    with activity(f"{step} of {name}"):
         result = subprocess.run(  # noqa: S602
             f"set -euo pipefail\n{cmd}",
             shell=True,
@@ -480,15 +623,26 @@ def cache_dir() -> Path:
     return Path(os.getenv("XDG_CACHE_HOME") or Path.home() / ".cache") / "pmg"
 
 
-def cached_download(url: str) -> Path:
-    """Downloads `url` to the cache, unless it was downloaded within the last hour."""
+async def cached_download(url: str) -> Path:
+    """Downloads `url` to the cache, unless it was downloaded within the last hour.
+
+    Concurrent calls for a URL share its download.
+    """
+    session = SESSION.get()
+    if url not in session.cached:
+        session.cached[url] = asyncio.create_task(refresh_cached(url))
+    return await session.cached[url]
+
+
+async def refresh_cached(url: str) -> Path:
+    """Downloads `url` to the cache, unless the cached copy is younger than an hour."""
     import hashlib
 
     path = cache_dir() / hashlib.sha256(url.encode()).hexdigest()[:16]
     if path.exists() and time.time() - path.stat().st_mtime < CACHE_SECONDS:
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    return download_file(url, path)
+    return await download_file(url, path)
 
 
 def alpine_repo() -> str:
@@ -505,15 +659,14 @@ def alpine_repo() -> str:
 
 
 @functools.cache
-def apk_index(repo: str) -> dict[str, str]:
-    """Maps the packages of an Alpine repo to their versions."""
+def read_apk_index(index: Path) -> dict[str, str]:
+    """Maps the packages in the downloaded index of an Alpine repo to their versions."""
     import tarfile
 
-    index = cached_download(f"{repo}/APKINDEX.tar.gz")
     with tarfile.open(index) as tar_file:
         member = tar_file.extractfile("APKINDEX")
         if member is None:  # pragma: no cover
-            raise PmgError(f"{repo} has no APKINDEX")
+            raise PmgError(f"{index} has no APKINDEX")
         text = member.read().decode()
     versions: dict[str, str] = {}
     # blocks of "X:value" lines, P is the package and V its version
@@ -524,19 +677,19 @@ def apk_index(repo: str) -> dict[str, str]:
     return versions
 
 
-def apk_version(repo: str, package: str) -> str:
+async def apk_version(repo: str, package: str) -> str:
     """Returns the version of a package in an Alpine repo.
 
     Raises:
         PmgError: If the repo has no such package.
     """
-    version = apk_index(repo).get(package)
+    version = read_apk_index(await cached_download(f"{repo}/APKINDEX.tar.gz")).get(package)
     if version is None:  # pragma: no cover
         raise PmgError(f"{repo} has no package {package}")
     return version
 
 
-def conda_file(channel: str, package: str, version: str | None = None) -> CondaFile:
+async def conda_file(channel: str, package: str, version: str | None = None) -> CondaFile:
     """Returns the newest .conda file of a package, of `version` if given.
 
     Raises:
@@ -547,7 +700,7 @@ def conda_file(channel: str, package: str, version: str | None = None) -> CondaF
     from pmg.models import CondaFile
 
     api = os.getenv("PMG_CONDA_API") or "https://api.anaconda.org"
-    listing = cached_download(f"{api}/package/{channel}/{package}/files")
+    listing = await cached_download(f"{api}/package/{channel}/{package}/files")
     files = [
         file
         for file in msgspec.json.decode(listing.read_bytes(), type=list[CondaFile])
@@ -572,8 +725,10 @@ def asset_name(pkg: Package, host: Platform) -> str:
     return template
 
 
-def fetch_release(name: str, pkg: Package, host: Platform) -> str:
+async def fetch_release(name: str, pkg: Package, host: Platform) -> str:
     """Returns the latest tag.
+
+    A release command runs in a thread, the other releases are HTTP requests.
 
     Raises:
         PmgError: If a release command fails or prints no tag.
@@ -582,36 +737,46 @@ def fetch_release(name: str, pkg: Package, host: Platform) -> str:
 
     rl = pkg.release
     if isinstance(rl, GitHubRelease):
-        return github_api().latest_release(*split_repo(rl.repo)).tag_name
+        return (await github_api().latest_release(*split_repo(rl.repo))).tag_name
     if isinstance(rl, CommandRelease):
-        tag = run_shell(name, "release command", rl.cmd).strip()
+        tag = (await asyncio.to_thread(run_shell, name, "release command", rl.cmd)).strip()
         if not tag:  # pragma: no cover
             raise PmgError(f"release command of {name} printed no tag")
         return tag
     if isinstance(rl, ApkRelease):
-        return apk_version(alpine_repo(), rl.package)
+        return await apk_version(alpine_repo(), rl.package)
     if isinstance(rl, CondaRelease):
-        return conda_file(rl.channel, asset_name(pkg, host)).version
+        return (await conda_file(rl.channel, asset_name(pkg, host))).version
     return rl.tag
 
 
-def download_file(url: str, dest: Path, checksum: str | None = None) -> Path:
-    """Downloads `url` to `dest`, verifying `checksum` ("sha256:<hex>") if given."""
+async def download_file(url: str, dest: Path, checksum: str | None = None) -> Path:
+    """Downloads `url` to `dest`, verifying `checksum` ("sha256:<hex>") if given.
+
+    At most `MAX_DOWNLOADS` run at once, so that their bars fit on the terminal.
+    """
     from pmg.consumers import Files, TransientProgress
 
+    session = SESSION.get()
     parts = urlsplit(url)
+    host = f"{parts.scheme}://{parts.netloc}"
     path = parts.path.lstrip("/") + (f"?{parts.query}" if parts.query else "")
-    files = Files(base_url=f"{parts.scheme}://{parts.netloc}", follow_redirects=True)
-    download = files.download(path=path)
-    # overwrite, as a .part left by a failed checksum would otherwise be resumed.
-    if not interactive():
-        return download(dest, checksum=checksum, overwrite=True)
-    with TransientProgress(desc=dest.name, file=sys.stderr) as progress:
-        return download(dest, checksum=checksum, overwrite=True, on_progress=progress)
+    files = session.files.get(host)
+    if files is None:
+        files = session.files[host] = Files(base_url=host, follow_redirects=True)
+    async with session.slots:
+        download = await files.download(path=path)
+        # overwrite, as a .part left by a failed checksum would otherwise be resumed.
+        if not interactive():
+            return await download(dest, checksum=checksum, overwrite=True)
+        with TransientProgress(desc=dest.name, file=sys.stderr) as progress:
+            return await download(dest, checksum=checksum, overwrite=True, on_progress=progress)
 
 
-def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath) -> list[Path]:
-    """Downloads the archives of the host platform to `dl_dir`.
+async def run_download(
+    pkg: Package, context: Context, host: Platform, dl_dir: StrPath
+) -> list[Path]:
+    """Downloads the archives of the host platform to `dl_dir`, all at once.
 
     Raises:
         PmgError: If there is no asset for the host platform.
@@ -627,30 +792,36 @@ def run_download(pkg: Package, context: Context, host: Platform, dl_dir: StrPath
         repo = alpine_repo()
         release = pkg.release.package if isinstance(pkg.release, ApkRelease) else None
         versions = {
-            package: tag if package == release else apk_version(repo, package)
+            package: tag if package == release else await apk_version(repo, package)
             for package in dl.packages
         }
-        return [
-            download_file(f"{repo}/{package}-{version}.apk", dl_dir / f"{package}-{version}.apk")
-            for package, version in versions.items()
-        ]
+        return list(
+            await asyncio.gather(
+                *(
+                    download_file(
+                        f"{repo}/{package}-{version}.apk", dl_dir / f"{package}-{version}.apk"
+                    )
+                    for package, version in versions.items()
+                )
+            )
+        )
     asset = render(asset_name(pkg, host), context)
     if isinstance(dl, CondaDownload):
-        file = conda_file(dl.channel, asset, tag)
+        file = await conda_file(dl.channel, asset, tag)
         mirror = os.getenv("PMG_CONDA_URL") or "https://conda.anaconda.org"
         checksum = f"sha256:{file.sha256}" if file.sha256 else None
         url = f"{mirror}/{dl.channel}/{file.basename}"
-        return [download_file(url, dl_dir / Path(file.basename).name, checksum)]
+        return [await download_file(url, dl_dir / Path(file.basename).name, checksum)]
     if isinstance(dl, GitHubDownload):
         if not dl.repo:  # pragma: no cover
             raise RuntimeError("GitHubDownload's repo not set in __post_init__")
-        info = github_api().release(*split_repo(dl.repo), tag=tag)
+        info = await github_api().release(*split_repo(dl.repo), tag=tag)
         found = next((a for a in info.assets if a.name == asset), None)
         if found is None:  # pragma: no cover
             raise PmgError(f"{dl.repo} {tag} has no asset {asset}")
-        return [download_file(found.browser_download_url, dl_dir / asset, found.digest)]
+        return [await download_file(found.browser_download_url, dl_dir / asset, found.digest)]
     url = render(dl.url, context, asset=asset)
-    return [download_file(url, dl_dir / Path(urlsplit(url).path).name)]
+    return [await download_file(url, dl_dir / Path(urlsplit(url).path).name)]
 
 
 def extract_tar(tar_file: tarfile.TarFile, dest: Path) -> None:
@@ -713,6 +884,28 @@ def unpack(archive: Path, dest: Path) -> None:
                 remove_path(path)
     else:
         shutil.copy2(archive, dest / archive.name)
+
+
+def unpack_all(archives: list[Path], dest: Path) -> None:
+    """Unpacks the archives into `dest`, one after another."""
+    for archive in archives:
+        unpack(archive, dest)
+
+
+def unpack_apart(archives: list[Path], dest: Path) -> None:
+    """Unpacks the archives into `dest` in a process of its own.
+
+    tarfile handles each member in Python, which holds the GIL, so threads unpacking together
+    would take turns. A spawned process, as forking one with threads may deadlock.
+    """
+    if not archives:
+        return
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+
+    context = multiprocessing.get_context("spawn")
+    with ProcessPoolExecutor(max_workers=1, mp_context=context) as pool:
+        pool.submit(unpack_all, archives, dest).result()
 
 
 def strip_single_dir(root: Path) -> Path:
@@ -853,8 +1046,8 @@ def run_install(
         run_shell(name, "download command", cmd, target, env)
     content = target.parent / "unpacked"
     content.mkdir()
-    for archive in archives:
-        unpack(archive, content)
+    with activity(f"unpacking of {name}"):
+        unpack_apart(archives, content)
     if isinstance(pkg.download, GitHubDownload | UrlDownload):
         content = strip_single_dir(content)
     asset = archives[0].name if archives else ""
@@ -1065,30 +1258,68 @@ def run_version_command(cmd: list[str], regex: str, dev_tool: bool) -> tuple[boo
     return True, match.group() if match else None
 
 
-def find_external(name: str, pkg: Package) -> Record | None:
+external_checks: dict[str, tuple[bool, str | None]] = {}
+"""Results of `check_external` by package, as an install asks for a package more than once."""
+
+
+def check_external(name: str, pkg: Package) -> tuple[bool, str | None]:
     """Detects a copy of the package that pmg did not install.
 
     The files and libraries of the check must exist, and its command must run. Without any of
     them, the first command of the package, or else its name, is looked up in PATH.
+
+    Returns:
+        Whether there is a copy, and its version if the check found one.
     """
-    from pmg.models import Check, Record
+    from pmg.models import Check
 
     context = make_context(name, pkg, "external")
     check = pkg.check or Check()
     files = [Path(render(file, context)) for file in check.files]
     libs = [render(lib, context) for lib in check.libs]
     if not all(file.exists() for file in files) or (libs and not libs_load(libs)):
-        return None
+        return False, None
     cmd = [render(arg, context) for arg in check.cmd] if check.cmd else None
     if cmd is None and not files and not libs:
         # packages that build their commands in post_install have none in the spec
         command = next(iter([*pkg.bin, *pkg.links]), name)
         cmd = [command, *check.args]
-    version = None
-    if cmd is not None:
-        found, version = run_version_command(cmd, check.regex, check.dev_tool)
-        if not found:
-            return None
+    if cmd is None:
+        return True, None
+    return run_version_command(cmd, check.regex, check.dev_tool)
+
+
+def check_externals(names: Iterable[str]) -> None:
+    """Checks for copies of the packages outside pmg all at once, as the checks run commands.
+
+    Only packages without a version of pmg are checked, or with a recorded external one, which
+    are those that `find_external` is asked for.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    records = load_records().values()
+    installed = {record.name for record in records if not record.external}
+    external = {record.name for record in records if record.external}
+    specs = {
+        name: load_spec(name)
+        for name in names
+        if (name not in installed or name in external) and name not in external_checks
+    }
+    with ThreadPoolExecutor() as pool:
+        results = pool.map(lambda name: check_external(name, specs[name]), specs)
+        external_checks.update(zip(specs, results, strict=True))
+
+
+def find_external(name: str, pkg: Package) -> Record | None:
+    """Returns a record of a copy of the package that pmg did not install, see `check_external`."""
+    from pmg.models import Record
+
+    # installs check all packages up front, see check_externals
+    found, version = external_checks.get(name) or external_checks.setdefault(
+        name, check_external(name, pkg)
+    )
+    if not found:
+        return None
     return Record(
         name=name,
         tag="external",
@@ -1286,17 +1517,25 @@ def run_test(name: str, pkg: Package, context: Context, record: Record, work: Pa
     run_shell(name, "test", test, work, env)
 
 
-def install_package(
+async def no_deps() -> None:
+    """Waits for no dependencies, for packages installed on their own."""
+
+
+async def install_package(  # noqa: PLR0913, PLR0917
     name: str,
     explicit: bool,
     tag: str | None = None,
     specifier: SpecifierSet | None = None,
     external: bool = True,
+    deps_ready: DepsReady = no_deps,
 ) -> None:
     """Installs a version of a package without its dependencies.
 
     Installs the latest version, or `tag`. The latest version becomes active; a given tag only if
     no other version is active. An installed version is only marked as explicit if requested.
+
+    Releases and downloads are HTTP requests, which start at once; release commands and the
+    install steps run in a thread after `deps_ready`, as they may use the dependencies.
 
     Args:
         name: Name of the package.
@@ -1304,6 +1543,7 @@ def install_package(
         tag: Release tag to install instead of the latest one.
         specifier: Versions its dependents accept; an installed one satisfies a dependency.
         external: Whether a version found outside pmg is enough.
+        deps_ready: Waits until the dependencies are installed.
 
     Raises:
         PmgError: If the package is not for the host, or its latest release does not meet the
@@ -1311,7 +1551,7 @@ def install_package(
     """
     from packaging.specifiers import SpecifierSet
 
-    from pmg.models import Record
+    from pmg.models import CommandRelease
 
     specifier = specifier or SpecifierSet()
     records = load_records()
@@ -1323,7 +1563,9 @@ def install_package(
     current = active_version(records, name)
     should_activate = tag is None or current is None
     if tag is None:
-        tag = fetch_release(name, pkg, host)
+        if isinstance(pkg.release, CommandRelease):
+            await deps_ready()
+        tag = await fetch_release(name, pkg, host)
         if not satisfies(tag, specifier):
             raise PmgError(f"a dependency needs {name}{specifier}, the latest release is {tag}")
     record = records.get(f"{name}@{tag}")
@@ -1335,37 +1577,64 @@ def install_package(
     context = make_context(name, pkg, tag)
     context.deps = dependency_vars(pkg, host, records)
     with target_layout(context) as target:
-        archives = run_download(pkg, context, host, target.parent / "download")
-        run_install(name, pkg, context, archives, target)
-        dirs = owned_dirs(target, context)
-        moves = [(path, destination(path, name, tag)) for path in track_installed_files(target)]
-        record = Record(
-            name=name,
-            tag=tag,
-            explicit=explicit,
-            active=False,
-            installed_at=time.time(),
-            deps=package_deps(pkg, host),
-            files=[str(dest) for _, dest in moves],
-            dirs=[str(dest) for dest in dirs.values()],
+        archives = await run_download(pkg, context, host, target.parent / "download")
+        await deps_ready()
+        records = load_records()
+        context.deps = dependency_vars(pkg, host, records)
+        await asyncio.to_thread(
+            install_staged, name, pkg, context, archives, target, explicit, should_activate
         )
-        verify_free(record, [*map(Path, record.files), *map(Path, record.dirs)])
-        if should_activate:
-            verify_links_free(record, current)
-        dir_moves = [(path.relative_to(target), dest) for path, dest in dirs.items()]
-        moved = move_data(target, [*moves, *dir_moves])
-        try:
-            run_test(name, pkg, context, record, target.parent / "test")
-            save_record(record)
-            if should_activate:
-                activate(record, {**records, record.key: record})
-        except BaseException:
-            rewind_state(moved)
-            # the record dir may be what failed.
-            with contextlib.suppress(OSError):
-                record_path(record.key).unlink(missing_ok=True)
-            raise
     logger.info("installed %s %s", name, tag)
+
+
+def install_staged(  # noqa: PLR0913, PLR0917
+    name: str,
+    pkg: Package,
+    context: Context,
+    archives: list[Path],
+    target: Path,
+    explicit: bool,
+    should_activate: bool,
+) -> None:
+    """Installs the downloaded archives of a version from the staging dir, see `install_package`.
+
+    The test runs once the files are in place; if it fails, they are removed again.
+    """
+    from pmg.models import Record
+
+    tag = context.tag
+    host = detect_platform(pkg.min_glibc_version)
+    records = load_records()
+    current = active_version(records, name)
+    run_install(name, pkg, context, archives, target)
+    dirs = owned_dirs(target, context)
+    moves = [(path, destination(path, name, tag)) for path in track_installed_files(target)]
+    record = Record(
+        name=name,
+        tag=tag,
+        explicit=explicit,
+        active=False,
+        installed_at=time.time(),
+        deps=package_deps(pkg, host),
+        files=[str(dest) for _, dest in moves],
+        dirs=[str(dest) for dest in dirs.values()],
+    )
+    verify_free(record, [*map(Path, record.files), *map(Path, record.dirs)])
+    if should_activate:
+        verify_links_free(record, current)
+    dir_moves = [(path.relative_to(target), dest) for path, dest in dirs.items()]
+    moved = move_data(target, [*moves, *dir_moves])
+    try:
+        run_test(name, pkg, context, record, target.parent / "test")
+        save_record(record)
+        if should_activate:
+            activate(record, {**records, record.key: record})
+    except BaseException:
+        rewind_state(moved)
+        # the record dir may be what failed.
+        with contextlib.suppress(OSError):
+            record_path(record.key).unlink(missing_ok=True)
+        raise
 
 
 def uninstall_version(record: Record) -> None:
@@ -1456,38 +1725,158 @@ def find_orphans(records: dict[str, Record]) -> list[str]:
     return sorted(key for key, record in records.items() if record.name not in required)
 
 
-def upgrade_package(name: str) -> None:
+async def upgrade_package(name: str, deps_ready: DepsReady = no_deps) -> None:
     """Upgrades the active version of a package to the latest release.
 
     Packages with an upgrade command update in place to a newer release, which their record keeps
     as upgraded_tag. Others get the latest release next to the active version, which it replaces
-    unless a dependent still needs it.
+    unless a dependent still needs it. Like `install_package`, commands wait for `deps_ready`.
     """
     import msgspec
 
-    records = load_records()
-    active = active_version(records, name)
+    from pmg.models import CommandRelease
+
+    active = active_version(load_records(), name)
     # external versions, which are never active, are left to their package manager
     if active is None:
         return
     pkg = load_spec(name)
-    latest = fetch_release(name, pkg, detect_platform(pkg.min_glibc_version))
+    if isinstance(pkg.release, CommandRelease):
+        await deps_ready()
+    latest = await fetch_release(name, pkg, detect_platform(pkg.min_glibc_version))
     if latest == active.current_tag:
         logger.info("%s %s is up to date", name, latest)
         return
     if pkg.upgrade:
-        context = installed_context(active, pkg, records)
-        run_shell(name, "upgrade", render(pkg.upgrade, context), env=command_env(pkg, context))
+        await deps_ready()
+        context = installed_context(active, pkg, load_records())
+        cmd, env = render(pkg.upgrade, context), command_env(pkg, context)
+        await asyncio.to_thread(run_shell, name, "upgrade", cmd, env=env)
         save_record(msgspec.structs.replace(active, upgraded_tag=latest))
         logger.info("upgraded %s in place to %s", name, latest)
         return
-    install_package(name, explicit=active.explicit, tag=latest)
+    await install_package(name, explicit=active.explicit, tag=latest, deps_ready=deps_ready)
     records = load_records()
     activate(records[f"{name}@{latest}"], records)
     try:
-        uninstall_packages([active.key])
+        await asyncio.to_thread(uninstall_packages, [active.key])
     except PmgError as e:
         logger.info("kept %s: %s", active.key, e)
+
+
+async def run_units(
+    desc: str,
+    deps: dict[str, set[str]],
+    unit: Callable[[str, DepsReady], Awaitable[None]],
+    skip_dependents: bool,
+) -> list[str]:
+    """Runs the unit of each package at once, which waits for its dependencies where it asks to.
+
+    A package is done as soon as its unit returns, also right away if it has nothing to do, which
+    lets the units of its dependents go on. On a terminal, a board shows the progress.
+
+    Args:
+        desc: What the units do, for the board.
+        deps: Dependencies of each package; those of other packages are not waited for.
+        unit: Coroutine function of a package, getting a function that waits for its dependencies.
+        skip_dependents: Whether the dependents of a failed package fail as well when they wait.
+
+    Returns:
+        The packages whose unit failed, in the order of `deps`.
+
+    Raises:
+        PmgError: If the dependencies form a cycle, which would wait forever.
+    """
+    try:
+        graphlib.TopologicalSorter(deps).prepare()
+    except graphlib.CycleError as e:
+        raise PmgError(f"dependency cycle: {' -> '.join(e.args[1])}") from e
+    done = {name: asyncio.Event() for name in deps}
+    failed: set[str] = set()
+    board = Board(desc, len(deps)) if interactive() and deps else None
+    BOARD.set(board)
+
+    async def run(name: str) -> None:
+        waits_for = sorted(deps[name] & done.keys())
+
+        async def deps_ready() -> None:
+            for dep in waits_for:
+                await done[dep].wait()
+            if skip_dependents and (broken := [dep for dep in waits_for if dep in failed]):
+                raise PmgError(f"skipped {name}, as {', '.join(broken)} failed")
+
+        try:
+            await unit(name, deps_ready)
+        # any error only fails the package, as the others go on, e.g. a failed download
+        except Exception as e:  # noqa: BLE001
+            if isinstance(e, PmgError):
+                logger.error("error: %s", e)  # noqa: TRY400
+            else:
+                # like the errors that end pmg, one line instead of a traceback
+                lines = str(e).splitlines()
+                logger.error("error: %s: %s", name, lines[0] if lines else type(e).__name__)  # noqa: TRY400
+            failed.add(name)
+        finally:
+            done[name].set()
+            if board is not None:
+                board.advance()
+
+    ticker = asyncio.create_task(board.tick()) if board is not None else None
+    try:
+        await asyncio.gather(*(run(name) for name in deps))
+    finally:
+        if ticker is not None and board is not None:
+            ticker.cancel()
+            board.bar.close()
+        BOARD.set(None)
+    return [name for name in deps if name in failed]
+
+
+def install_packages(requested: dict[str, list[str | None]], external: bool) -> list[str]:
+    """Installs the requested packages and the dependencies they need, see `install_package`.
+
+    A package that fails skips only itself and its dependents.
+
+    Args:
+        requested: Requested tags by package, None for the latest one.
+        external: Whether a version found outside pmg is enough for the requested packages.
+
+    Returns:
+        The packages that failed or were skipped.
+    """
+    order, specifiers = resolve_install_order(list(requested))
+    # the checks for copies outside pmg run a command each, so they run together up front
+    check_externals(order)
+    needed = needed_packages(requested, order, specifiers, external=external)
+    deps = {name: dep_names(name) for name in order if name in needed}
+
+    async def unit(name: str, deps_ready: DepsReady) -> None:
+        for tag in requested.get(name, []):
+            await install_package(
+                name, explicit=True, tag=tag, external=external, deps_ready=deps_ready
+            )
+        # dependencies, or requested packages whose dependents need other versions
+        if name not in requested or name in specifiers:
+            await install_package(
+                name, explicit=False, specifier=specifiers.get(name), deps_ready=deps_ready
+            )
+
+    return run_async(run_units("installing", deps, unit, skip_dependents=True))
+
+
+def upgrade_packages(names: Iterable[str]) -> list[str]:
+    """Upgrades packages all at once, see `upgrade_package`.
+
+    Returns:
+        The packages that failed; the others are upgraded anyway, as the versions they depend on
+        stay installed.
+    """
+    records = load_records()
+    deps = {
+        name: {dep.name for r in records.values() if r.name == name for dep in requirements(r.deps)}
+        for name in sorted(names)
+    }
+    return run_async(run_units("upgrading", deps, upgrade_package, skip_dependents=False))
 
 
 @contextlib.contextmanager

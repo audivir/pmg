@@ -44,7 +44,7 @@ Repository = "https://github.com/audivir/pmg"
 Issues = "https://github.com/audivir/pmg/issues"
 
 [dependency-groups]
-dev = ["mypy", "pytest", "coverage", "prek", "ruff"]
+dev = ["mypy", "pytest", "coverage", "prek", "pyte", "ruff"]
 
 [tool.pdm.version]
 source = "file"

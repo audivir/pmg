@@ -66,16 +66,13 @@ def install(
     """
     from pmg.core import (
         PmgError,
-        dep_names,
         ensure_registry,
         exit_on_error,
         expand_globs,
-        install_package,
+        install_packages,
         is_for_host,
         is_glob,
         load_spec,
-        needed_packages,
-        resolve_install_order,
     )
 
     with exit_on_error():
@@ -94,26 +91,7 @@ def install(
         for arg in names:
             name, _, tag = arg.partition("@")
             requested.setdefault(name, []).append(tag or None)
-        order, specifiers = resolve_install_order(list(requested))
-        needed = needed_packages(requested, order, specifiers, external=not no_external)
-        failed: list[str] = []
-        for name in (name for name in order if name in needed):
-            if broken := sorted(dep_names(name) & set(failed)):
-                logger.error("error: skipped %s, as %s failed", name, ", ".join(broken))
-                failed.append(name)
-                continue
-            try:
-                for requested_tag in requested.get(name, []):
-                    install_package(
-                        name, explicit=True, tag=requested_tag, external=not no_external
-                    )
-                # dependencies, or requested packages whose dependents need other versions
-                if name not in requested or name in specifiers:
-                    install_package(name, explicit=False, specifier=specifiers.get(name))
-            except PmgError as e:
-                logger.error("error: %s", e)  # noqa: TRY400
-                failed.append(name)
-        if failed:
+        if failed := install_packages(requested, external=not no_external):
             raise PmgError(f"not installed: {', '.join(failed)}")
 
 
@@ -161,16 +139,18 @@ def upgrade(
 ) -> None:
     """Upgrades packages to their latest release.
 
+    A package that fails does not stop the others, pmg upgrades them and then exits with an error.
+
     Args:
         names: Names of the packages to upgrade, or globs like "zst*" matching the names of
             installed packages; all installed ones if none are given.
     """
-    from pmg.core import exit_on_error, expand_globs, load_records, upgrade_package
+    from pmg.core import PmgError, exit_on_error, expand_globs, load_records, upgrade_packages
 
     with exit_on_error():
         installed = {record.name for record in load_records().values()}
-        for name in sorted(set(expand_globs(names, installed) if names else installed)):
-            upgrade_package(name)
+        if failed := upgrade_packages(set(expand_globs(names, installed) if names else installed)):
+            raise PmgError(f"not upgraded: {', '.join(failed)}")
 
 
 def update() -> None:

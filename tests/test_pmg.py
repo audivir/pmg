@@ -5,6 +5,7 @@ Set PMG_OFFLINE=1 to skip the test that installs bat from GitHub.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes.util
 import functools
 import gzip
@@ -938,7 +939,7 @@ def test_progress_on_a_terminal(
     monkeypatch.setattr(pmg.core, "interactive", lambda: True)
     (env.assets / "archive.tar.gz").write_bytes(b"x" * 100_000)
     dest = env.root / "archive.tar.gz"
-    pmg.core.download_file(f"{env.base_url}/archive.tar.gz", dest)
+    pmg.core.run_async(pmg.core.download_file(f"{env.base_url}/archive.tar.gz", dest))
     assert dest.stat().st_size == 100_000
     # the bar of the download, which it clears once done
     assert "archive.tar.gz" in capsys.readouterr().err
@@ -987,6 +988,91 @@ def test_failed_package_skips_only_its_dependents(env: Env) -> None:
     assert "error: skipped dependent, as broken failed" in stderr
     assert "not installed: broken, dependent" in stderr
     assert set(env.installed()) == {"fine@v1.0"}
+
+
+def test_failed_download_fails_only_its_package(env: Env) -> None:
+    env.add_package("fine")
+    env.add_package("gone")
+    (env.assets / "gone-1.0.tar.gz").unlink()
+    stderr = env.pmg("install", "fine", "gone", ok=False).stderr
+    assert "error: gone: Client error '404" in stderr
+    assert set(env.installed()) == {"fine@v1.0"}
+
+
+def test_dependents_wait_for_dependencies(env: Env) -> None:
+    # the release command of app runs the command of tool, which installs at the same time
+    env.add_package("tool", post_install="sleep 0.5")
+    release = 'type = "command"\ncmd = "tool | cut -d\' \' -f1 >/dev/null && echo v1.0"'
+    env.add_package("app", deps=("tool",), release=release, test="{{ cmd }} && tool")
+    env.pmg("install", "app")
+    assert set(env.installed()) == {"app@v1.0", "tool@v1.0"}
+
+
+def test_failed_upgrade_does_not_stop_the_others(env: Env) -> None:
+    env.add_package("tool")
+    env.add_package("app", deps=("tool",))
+    env.pmg("install", "app")
+    env.add_package("tool", release='type = "command"\ncmd = "exit 1"')
+    env.add_package("app", deps=("tool",), version="2.0")
+    stderr = env.pmg("upgrade", ok=False).stderr
+    assert "release command of tool failed" in stderr
+    assert "not upgraded: tool" in stderr
+    assert set(env.installed()) == {"app@v2.0", "tool@v1.0"}
+
+
+def test_upgrade_refuses_dependency_cycle(env: Env) -> None:
+    env.add_package("one")
+    env.add_package("two")
+    env.pmg("install", "one", "two")
+    # records of specs whose dependencies changed since
+    for name, dep in [("one", "two"), ("two", "one")]:
+        path = env.pmg_home / "installed" / f"{name}@v1.0.json"
+        record = json.loads(path.read_text())
+        path.write_text(json.dumps(record | {"deps": [dep]}))
+    assert "dependency cycle" in env.pmg("upgrade", ok=False).stderr
+
+
+def test_progress_of_packages_on_a_terminal(env: Env) -> None:
+    import fcntl
+    import pty
+    import struct
+    import termios
+
+    import pyte
+
+    env.add_package("dep", post_install="sleep 1.5")
+    env.add_package("app", deps=("dep",))
+    env.add_package("other", release='type = "command"\ncmd = "echo v1.0"')
+    pmg_env = clean_environ(env.home) | {
+        "PMG_HOME": str(env.pmg_home),
+        "PMG_SPECS_DIR": str(env.specs),
+    }
+    columns, lines = 100, 20
+    controller, terminal = pty.openpty()
+    fcntl.ioctl(terminal, termios.TIOCSWINSZ, struct.pack("HHHH", lines, columns, 0, 0))
+    with subprocess.Popen(
+        [sys.executable, "-m", "pmg", "install", "app", "other"],
+        env=pmg_env,
+        stdin=terminal,
+        stdout=terminal,
+        stderr=terminal,
+    ) as process:
+        os.close(terminal)
+        output = b""
+        with contextlib.suppress(OSError):
+            while data := os.read(controller, 65536):
+                output += data
+    os.close(controller)
+    assert process.returncode == 0
+    screen = pyte.Screen(columns, lines)
+    pyte.ByteStream(screen).feed(output)
+    shown = [line.rstrip() for line in screen.display if line.strip()]
+    # the board showed the steps, then cleared itself and left the log lines
+    assert b"installing" in output
+    assert b"post_install of dep" in output
+    assert sorted(shown) == ["installed app v1.0", "installed dep v1.0", "installed other v1.0"]
+    assert screen.cursor.x == 0
+    assert shown.index("installed dep v1.0") < shown.index("installed app v1.0")
 
 
 def test_globs_skip_packages_not_for_the_host(env: Env) -> None:

@@ -144,6 +144,11 @@ eval "$(pmg env)"
 - `upgrade` installs the latest release of each active version next to it and makes it active. The
   old version goes unless a dependent still needs it. Packages with an `upgrade` command update in
   place, but only when a newer release exists, and `list` shows the release they were upgraded to. External versions are left to their package manager.
+- `install` and `upgrade` work on all packages at once: release checks, downloads, and the checks
+  for copies outside pmg run in parallel, while release commands and the install steps of a
+  package wait until its dependencies are done. A package that fails only skips its dependents.
+  On a terminal, a bar counts the finished packages and names the running steps, with a bar for
+  each download below it.
 - `autoremove` removes dependencies that no directly installed package needs anymore.
 - `env` prints shell code setting the environment and `PATH` entries of the active versions. Every
   command also writes it to `$PMG_HOME/env.sh`, which shells can source without starting pmg.
