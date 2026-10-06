@@ -43,7 +43,6 @@ from pmg.packaging_utils import requirements, tag_version
 if TYPE_CHECKING:
     import tarfile
     from collections.abc import Awaitable, Callable, Generator, Iterable
-    from typing import TypeAlias
 
     import jinja2
     from _typeshed import StrPath
@@ -83,8 +82,6 @@ MAX_DOWNLOADS = 6
 """Downloads at once, each with a bar of its own on a terminal."""
 
 T = TypeVar("T")
-DepsReady: TypeAlias = "Callable[[], Awaitable[None]]"
-"""Waits until the dependencies of a package are done, see `run_units`."""
 
 logger = logging.getLogger(__package__)
 
@@ -1517,8 +1514,60 @@ def run_test(name: str, pkg: Package, context: Context, record: Record, work: Pa
     run_shell(name, "test", test, work, env)
 
 
-async def no_deps() -> None:
-    """Waits for no dependencies, for packages installed on their own."""
+class Deps:
+    """The dependencies of a package that `run_units` installs or upgrades at the same time."""
+
+    def __init__(
+        self,
+        name: str = "",
+        done: dict[str, asyncio.Event] | None = None,
+        failed: set[str] | None = None,
+        skip_failed: bool = False,
+    ) -> None:
+        """Takes the events set when each is done, none for a package installed on its own.
+
+        Args:
+            name: Name of the package.
+            done: Events of the dependencies, set when they are done.
+            failed: Packages that failed, filled while the dependencies are done.
+            skip_failed: Whether the package is skipped if a dependency failed.
+        """
+        self.name = name
+        self.done = done or {}
+        self.failed = failed if failed is not None else set()
+        self.skip_failed = skip_failed
+
+    @property
+    def pending(self) -> bool:
+        """Whether some are not done yet."""
+        return not all(event.is_set() for event in self.done.values())
+
+    async def ready(self) -> None:
+        """Waits until all are done.
+
+        Raises:
+            PmgError: If one failed and the package is skipped then.
+        """
+        for event in self.done.values():
+            await event.wait()
+        if self.skip_failed and (broken := [dep for dep in self.done if dep in self.failed]):
+            raise PmgError(f"skipped {self.name}, as {', '.join(broken)} failed")
+
+
+async def fetch_release_early(name: str, pkg: Package, host: Platform, deps: Deps) -> str:
+    """Returns the latest tag, see `fetch_release`, without waiting for the dependencies first.
+
+    A release command may use a dependency, e.g. curl, but mostly finds what it uses already
+    there, so it runs at once, and once more after the dependencies if it failed while they were
+    pending; it only prints the tag, so an early run is harmless. Releases over HTTP never wait.
+    """
+    from pmg.models import CommandRelease
+
+    if isinstance(pkg.release, CommandRelease) and deps.pending:
+        with contextlib.suppress(PmgError):
+            return await fetch_release(name, pkg, host)
+        await deps.ready()
+    return await fetch_release(name, pkg, host)
 
 
 async def install_package(  # noqa: PLR0913, PLR0917
@@ -1527,15 +1576,15 @@ async def install_package(  # noqa: PLR0913, PLR0917
     tag: str | None = None,
     specifier: SpecifierSet | None = None,
     external: bool = True,
-    deps_ready: DepsReady = no_deps,
+    deps: Deps | None = None,
 ) -> None:
     """Installs a version of a package without its dependencies.
 
     Installs the latest version, or `tag`. The latest version becomes active; a given tag only if
     no other version is active. An installed version is only marked as explicit if requested.
 
-    Releases and downloads are HTTP requests, which start at once; release commands and the
-    install steps run in a thread after `deps_ready`, as they may use the dependencies.
+    The release and the downloads start at once, see `fetch_release_early`; the install steps run
+    in a thread once the dependencies are ready, as they may use them.
 
     Args:
         name: Name of the package.
@@ -1543,7 +1592,7 @@ async def install_package(  # noqa: PLR0913, PLR0917
         tag: Release tag to install instead of the latest one.
         specifier: Versions its dependents accept; an installed one satisfies a dependency.
         external: Whether a version found outside pmg is enough.
-        deps_ready: Waits until the dependencies are installed.
+        deps: Dependencies installed at the same time.
 
     Raises:
         PmgError: If the package is not for the host, or its latest release does not meet the
@@ -1551,8 +1600,7 @@ async def install_package(  # noqa: PLR0913, PLR0917
     """
     from packaging.specifiers import SpecifierSet
 
-    from pmg.models import CommandRelease
-
+    deps = deps or Deps()
     specifier = specifier or SpecifierSet()
     records = load_records()
     pkg = load_spec(name)
@@ -1563,9 +1611,7 @@ async def install_package(  # noqa: PLR0913, PLR0917
     current = active_version(records, name)
     should_activate = tag is None or current is None
     if tag is None:
-        if isinstance(pkg.release, CommandRelease):
-            await deps_ready()
-        tag = await fetch_release(name, pkg, host)
+        tag = await fetch_release_early(name, pkg, host, deps)
         if not satisfies(tag, specifier):
             raise PmgError(f"a dependency needs {name}{specifier}, the latest release is {tag}")
     record = records.get(f"{name}@{tag}")
@@ -1578,7 +1624,7 @@ async def install_package(  # noqa: PLR0913, PLR0917
     context.deps = dependency_vars(pkg, host, records)
     with target_layout(context) as target:
         archives = await run_download(pkg, context, host, target.parent / "download")
-        await deps_ready()
+        await deps.ready()
         records = load_records()
         context.deps = dependency_vars(pkg, host, records)
         await asyncio.to_thread(
@@ -1725,37 +1771,34 @@ def find_orphans(records: dict[str, Record]) -> list[str]:
     return sorted(key for key, record in records.items() if record.name not in required)
 
 
-async def upgrade_package(name: str, deps_ready: DepsReady = no_deps) -> None:
+async def upgrade_package(name: str, deps: Deps | None = None) -> None:
     """Upgrades the active version of a package to the latest release.
 
     Packages with an upgrade command update in place to a newer release, which their record keeps
     as upgraded_tag. Others get the latest release next to the active version, which it replaces
-    unless a dependent still needs it. Like `install_package`, commands wait for `deps_ready`.
+    unless a dependent still needs it. Like `install_package`, commands wait for `deps`.
     """
     import msgspec
 
-    from pmg.models import CommandRelease
-
+    deps = deps or Deps()
     active = active_version(load_records(), name)
     # external versions, which are never active, are left to their package manager
     if active is None:
         return
     pkg = load_spec(name)
-    if isinstance(pkg.release, CommandRelease):
-        await deps_ready()
-    latest = await fetch_release(name, pkg, detect_platform(pkg.min_glibc_version))
+    latest = await fetch_release_early(name, pkg, detect_platform(pkg.min_glibc_version), deps)
     if latest == active.current_tag:
         logger.info("%s %s is up to date", name, latest)
         return
     if pkg.upgrade:
-        await deps_ready()
+        await deps.ready()
         context = installed_context(active, pkg, load_records())
         cmd, env = render(pkg.upgrade, context), command_env(pkg, context)
         await asyncio.to_thread(run_shell, name, "upgrade", cmd, env=env)
         save_record(msgspec.structs.replace(active, upgraded_tag=latest))
         logger.info("upgraded %s in place to %s", name, latest)
         return
-    await install_package(name, explicit=active.explicit, tag=latest, deps_ready=deps_ready)
+    await install_package(name, explicit=active.explicit, tag=latest, deps=deps)
     records = load_records()
     activate(records[f"{name}@{latest}"], records)
     try:
@@ -1767,7 +1810,7 @@ async def upgrade_package(name: str, deps_ready: DepsReady = no_deps) -> None:
 async def run_units(
     desc: str,
     deps: dict[str, set[str]],
-    unit: Callable[[str, DepsReady], Awaitable[None]],
+    unit: Callable[[str, Deps], Awaitable[None]],
     skip_dependents: bool,
 ) -> list[str]:
     """Runs the unit of each package at once, which waits for its dependencies where it asks to.
@@ -1778,7 +1821,7 @@ async def run_units(
     Args:
         desc: What the units do, for the board.
         deps: Dependencies of each package; those of other packages are not waited for.
-        unit: Coroutine function of a package, getting a function that waits for its dependencies.
+        unit: Coroutine function of a package, getting its dependencies to wait for.
         skip_dependents: Whether the dependents of a failed package fail as well when they wait.
 
     Returns:
@@ -1797,16 +1840,9 @@ async def run_units(
     BOARD.set(board)
 
     async def run(name: str) -> None:
-        waits_for = sorted(deps[name] & done.keys())
-
-        async def deps_ready() -> None:
-            for dep in waits_for:
-                await done[dep].wait()
-            if skip_dependents and (broken := [dep for dep in waits_for if dep in failed]):
-                raise PmgError(f"skipped {name}, as {', '.join(broken)} failed")
-
+        events = {dep: done[dep] for dep in sorted(deps[name] & done.keys())}
         try:
-            await unit(name, deps_ready)
+            await unit(name, Deps(name, events, failed, skip_dependents))
         # any error only fails the package, as the others go on, e.g. a failed download
         except Exception as e:  # noqa: BLE001
             if isinstance(e, PmgError):
@@ -1850,16 +1886,12 @@ def install_packages(requested: dict[str, list[str | None]], external: bool) -> 
     needed = needed_packages(requested, order, specifiers, external=external)
     deps = {name: dep_names(name) for name in order if name in needed}
 
-    async def unit(name: str, deps_ready: DepsReady) -> None:
+    async def unit(name: str, deps: Deps) -> None:
         for tag in requested.get(name, []):
-            await install_package(
-                name, explicit=True, tag=tag, external=external, deps_ready=deps_ready
-            )
+            await install_package(name, explicit=True, tag=tag, external=external, deps=deps)
         # dependencies, or requested packages whose dependents need other versions
         if name not in requested or name in specifiers:
-            await install_package(
-                name, explicit=False, specifier=specifiers.get(name), deps_ready=deps_ready
-            )
+            await install_package(name, explicit=False, specifier=specifiers.get(name), deps=deps)
 
     return run_async(run_units("installing", deps, unit, skip_dependents=True))
 

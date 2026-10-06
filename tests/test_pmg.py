@@ -1008,6 +1008,22 @@ def test_dependents_wait_for_dependencies(env: Env) -> None:
     assert set(env.installed()) == {"app@v1.0", "tool@v1.0"}
 
 
+def test_release_command_runs_before_dependencies_are_done(env: Env) -> None:
+    # the release command needs no dependency, so the release, and with it the download, need
+    # not wait for the build of one
+    done, order = env.root / "dep-done", env.root / "order"
+    env.add_package("dep", post_install=f"sleep 1 && touch {done}")
+    release = f"""type = "command"
+cmd = '''
+if [ -e {done} ]; then echo late > {order}; else echo early > {order}; fi
+echo v1.0
+'''"""
+    env.add_package("app", deps=("dep",), release=release)
+    env.pmg("install", "app")
+    assert order.read_text() == "early\n"
+    assert set(env.installed()) == {"app@v1.0", "dep@v1.0"}
+
+
 def test_failed_upgrade_does_not_stop_the_others(env: Env) -> None:
     env.add_package("tool")
     env.add_package("app", deps=("tool",))
