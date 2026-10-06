@@ -1032,6 +1032,13 @@ def test_upgrade_refuses_dependency_cycle(env: Env) -> None:
     assert "dependency cycle" in env.pmg("upgrade", ok=False).stderr
 
 
+def read_terminal(fd: int) -> bytes:
+    """Reads the output of a terminal, b"" at its end, which Linux reports as an error."""
+    with contextlib.suppress(OSError):
+        return os.read(fd, 65536)
+    return b""  # pragma: no cover
+
+
 def test_progress_of_packages_on_a_terminal(env: Env) -> None:
     import fcntl
     import pty
@@ -1059,9 +1066,8 @@ def test_progress_of_packages_on_a_terminal(env: Env) -> None:
     ) as process:
         os.close(terminal)
         output = b""
-        with contextlib.suppress(OSError):
-            while data := os.read(controller, 65536):
-                output += data
+        while data := read_terminal(controller):
+            output += data
     os.close(controller)
     assert process.returncode == 0
     screen = pyte.Screen(columns, lines)
