@@ -316,6 +316,7 @@ def test_man_pages_and_completions(env: Env) -> None:
     assert all(path.is_file() for path in installed)
     env.pmg("uninstall", "tool")
     assert not any(path.exists() for path in installed)
+    assert not list((env.pmg_home / "share").glob("tool@*"))
 
 
 def test_man_page_globs(env: Env) -> None:

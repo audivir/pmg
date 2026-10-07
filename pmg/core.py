@@ -1713,6 +1713,8 @@ def uninstall_version(record: Record) -> None:
         unlink_active(record)
     for path in [*record.files, *record.dirs]:
         remove_path(Path(path))
+    # the files are gone, but not the dirs holding them per kind
+    shutil.rmtree(version_store(record.name, record.tag), ignore_errors=True)
     record_path(record.key).unlink()
     logger.info("uninstalled %s", record.key)
 
