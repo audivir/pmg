@@ -318,6 +318,34 @@ def test_man_pages_and_completions(env: Env) -> None:
     assert not any(path.exists() for path in installed)
 
 
+def test_man_page_globs(env: Env) -> None:
+    env.add_package(
+        "tool",
+        files={
+            "man/tool.1": ".TH TOOL 1\n",
+            "man/tool-sub.1": ".TH SUB 1\n",
+            "man/toolrc.5": ".TH RC 5\n",
+        },
+        spec=('man = ["man/*.1", "man/*.5"]',),
+    )
+    env.pmg("install", "tool")
+    man = env.data / "man"
+    assert all(
+        path.is_file()
+        for path in (
+            man / "man1" / "tool.1",
+            man / "man1" / "tool-sub.1",
+            man / "man5" / "toolrc.5",
+        )
+    )
+
+
+def test_man_page_glob_without_match(env: Env) -> None:
+    env.add_package("tool", spec=('man = ["man/*.1"]',))
+    assert "has no man/*.1" in env.pmg("install", "tool", ok=False).stderr
+    assert env.installed() == {}
+
+
 def test_generated_completion_runs_staged_command(env: Env) -> None:
     env.add_package("tool", spec=('completions.tool = { zsh = { cmd = "tool" } }',))
     env.pmg("install", "tool")

@@ -942,6 +942,24 @@ def target_layout(context: Context) -> Generator[Path]:
         yield target
 
 
+def stage_man_pages(
+    templates: list[str], context: Context, content: Path, asset: str, target: Path
+) -> None:
+    """Places the man pages each path or glob matches in the archive in the staging dir.
+
+    Raises:
+        PmgError: If a path or glob matches no file.
+    """
+    for template in templates:
+        pattern = render(template, context, asset=asset)
+        if not (pages := sorted(path for path in content.glob(pattern) if path.is_file())):
+            raise PmgError(f"{asset} has no {pattern}")
+        for page in pages:
+            section = Path(page.name.removesuffix(".gz")).suffix.removeprefix(".")
+            (target / "man" / f"man{section}").mkdir(exist_ok=True)
+            shutil.copy2(page, target / "man" / f"man{section}" / page.name)
+
+
 def stage_files(
     pkg: Package, context: Context, content: Path, asset: str, target: Path
 ) -> list[tuple[str, Path]]:
@@ -966,11 +984,7 @@ def stage_files(
         dest.chmod(dest.stat().st_mode | 0o111)
     for bin_name, template in pkg.links.items():
         (target / "bin" / bin_name).symlink_to(render(template, context))
-    for template in pkg.man:
-        page = source(template)
-        section = Path(page.name.removesuffix(".gz")).suffix.removeprefix(".")
-        (target / "man" / f"man{section}").mkdir(exist_ok=True)
-        shutil.copy2(page, target / "man" / f"man{section}" / page.name)
+    stage_man_pages(pkg.man, context, content, asset, target)
     generated: list[tuple[str, Path]] = []
     for command, completions in pkg.completions.items():
         for shell, file_name in COMPLETION_NAMES.items():

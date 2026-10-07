@@ -56,7 +56,8 @@ macos_arm64 = "bat-{{ tag }}-aarch64-apple-darwin.tar.gz"
   platform whose asset is used, e.g. a loader for the musl build on old glibc hosts.
 - `bin` maps names in `~/.local/bin` to paths in the archive. A single top-level directory in
   the archive is stripped. `links` adds symlinks instead of copies.
-- `man` lists man pages in the archive, the file extension is the section.
+- `man` lists man pages in the archive as paths or globs (`share/man/man1/*.1`), the file extension
+  is the section.
 - `completions` maps a command to its completion script per shell, either a path in the archive
   or `{ cmd = "..." }`, a command printing it.
 - Everything else belongs in the package directory `{{ dir }}`, by default `$XDG_DATA_HOME/<name>`

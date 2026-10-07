@@ -181,7 +181,7 @@ class Package(BaseStruct, kw_only=True):
     links: dict[str, str] = {}
     """Name in the bin dir mapped to the target of a symlink."""
     man: list[str] = []
-    """Paths of man pages in the archive; the file extension is the section."""
+    """Paths or globs of man pages in the archive; the file extension is the section."""
     completions: dict[str, Completions] = {}
     """Command mapped to its completion scripts."""
     check: Check | None = None
