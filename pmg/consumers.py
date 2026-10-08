@@ -7,7 +7,16 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from mxhttp import AsyncConsumer, AsyncDownloader, RawPath, TqdmProgress, base_url, get
+from mxhttp import (
+    AsyncConsumer,
+    AsyncDownloader,
+    RawPath,
+    Retry,
+    TqdmProgress,
+    base_url,
+    get,
+    retry,
+)
 from tqdm import tqdm
 
 # typing has override only from Python 3.12 on.
@@ -47,6 +56,8 @@ class TransientProgress(TqdmProgress):
         )
 
 
+# a connect timeout or a server error retries with backoff, as downloads do on their own
+@retry(Retry())
 @base_url("https://api.github.com")
 class GitHubApi(AsyncConsumer):
     """Wraps the release endpoints of the GitHub API."""
