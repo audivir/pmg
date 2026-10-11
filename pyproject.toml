@@ -39,9 +39,9 @@ pmg = "pmg.__main__:main"
 [project.optional-dependencies]
 
 [project.urls]
-Homepage = "https://github.com/audivir/pmg"
-Repository = "https://github.com/audivir/pmg"
-Issues = "https://github.com/audivir/pmg/issues"
+Homepage = "https://github.com/zshsetup/pmg"
+Repository = "https://github.com/zshsetup/pmg"
+Issues = "https://github.com/zshsetup/pmg/issues"
 
 [dependency-groups]
 dev = ["mypy", "pytest", "coverage", "prek", "pyte", "ruff"]

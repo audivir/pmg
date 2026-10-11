@@ -1,7 +1,7 @@
 """Resolving, installing, and uninstalling packages from their specs.
 
 Package specs are TOML files named after the package, searched in `$PMG_SPECS_DIR`, then in
-`$PMG_HOME/specs`, then in the registry, which `pmg update` downloads from the audivir/pmg-specs
+`$PMG_HOME/specs`, then in the registry, which `pmg update` downloads from the zshsetup/pmg-specs
 repo. Templates in a spec are Jinja templates with
 {{ tag }} (the release tag, e.g. "v0.26.1"), {{ version }} (the tag without a leading "v"),
 {{ arch }} (the machine as `uname -m` prints it), {{ data }} (`$XDG_DATA_HOME`), {{ bin }} (the bin
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from pmg.models import CondaFile, Context, Package, Platform, Record
 
 GH_TOKEN_ENV = "PMG_GH_TOKEN"  # noqa: S105
-REGISTRY_URL = "https://github.com/audivir/pmg-specs/archive/refs/heads/main.tar.gz"
+REGISTRY_URL = "https://github.com/zshsetup/pmg-specs/archive/refs/heads/main.tar.gz"
 HOST_PLATFORMS: dict[tuple[str, str], Platform] = {
     ("glibc", "x86_64"): "glibc_x64",
     ("glibc", "aarch64"): "glibc_arm64",

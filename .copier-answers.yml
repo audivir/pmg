@@ -4,7 +4,7 @@ _src_path: gh:audivir/copier-template
 author_email: pypi@audivir.de
 author_name: Tim Hörmann
 description: Simple package manager for prebuilt binaries in the home directory.
-github_org: audivir
+github_org: zshsetup
 project_name: pmg
 project_slug: pmg
 project_type: python
